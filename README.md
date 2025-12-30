@@ -1,6 +1,7 @@
 # Scale-DiT: Ultra-High-Resolution Image Generation with Hierarchical Local Attention
 
 [![arXiv](https://img.shields.io/badge/arXiv-2510.16325-b31b1b.svg)](https://arxiv.org/abs/2510.16325)
+[![PDF](https://img.shields.io/badge/PDF-2510.16325-b31b1b.svg)](https://arxiv.org/pdf/2510.16325)
 
 Official code for **Scale-DiT** ([arXiv:2510.16325](https://arxiv.org/abs/2510.16325)):
 *Yuyao Zhang, Yu-Wing Tai*.
@@ -35,9 +36,22 @@ Below are example generations with the comparison of high-res output and low-res
 
 ## Benchmark
 
-> **Placeholder**: add quantitative tables (FID / IS / CLIPScore / speed / memory) here.
+Quantitative comparison at **4K × 4K** resolution. **Best** is in **bold**, **second-best** is <ins>underlined</ins>.
 
-![Benchmark placeholder](https://dummyimage.com/1600x900/eeeeee/555555.png&text=Benchmark+%2F+Table+Placeholder)
+| Method | CLIP-IQA ↑ | FID ↓ | FID<sub>patch</sub> ↓ | IS ↑ | IS<sub>patch</sub> ↑ | CLIP Score ↑ |
+|---|---:|---:|---:|---:|---:|---:|
+| SANA | 0.4457 | 76.31 | 74.27 | 16.68 | **14.02** | 0.3197 |
+| Diffusion-4K | 0.3012 | 121.85 | 120.59 | 14.39 | 10.77 | 0.2844 |
+| UltraPixel | 0.4421 | 77.42 | 70.94 | 16.98 | 13.26 | **0.3251** |
+| URAE | 0.3369 | <ins>67.39</ins> | <ins>62.56</ins> | 17.11 | 12.39 | 0.3204 |
+| FLUX+SR (BSRGAN) | 0.3897 | 71.39 | 63.45 | 17.08 | 12.87 | 0.3210 |
+| DemoFusion | 0.4392 | 74.89 | 66.37 | 16.23 | 13.02 | 0.3187 |
+| DiffuseHigh | 0.4221 | 81.54 | 73.35 | 16.15 | 13.08 | 0.3175 |
+| HiDiffusion | 0.4021 | 172.46 | 217.49 | 9.43 | 8.12 | 0.3129 |
+| FreCas | 0.2704 | 213.44 | 322.08 | 7.98 | 6.84 | 0.2805 |
+| I-MAX | 0.4381 | 70.33 | 65.67 | 16.50 | 12.69 | 0.3211 |
+| HiFlow | 0.4407 | 69.18 | 63.72 | <ins>17.13</ins> | <ins>13.43</ins> | 0.3113 |
+| **Scale-DiT (Ours)** | **0.4505** | **67.03** | **61.78** | **17.21** | 13.31 | <ins>0.3231</ins> |
 
 ## Visualization
 
@@ -52,28 +66,16 @@ Below are qualitative comparisons against other methods:
 - Training code ✅
 - Inference code ✅
 - Model checkpoints (LoRA) ✅ (see `checkpoints/`)
-- More evaluation scripts / benchmark tables (TODO)
 
 ## Installation
 
-This project uses **Accelerate** + **Lightning** + **Diffusers**.
+You can also install torch from the [official PyTorch website](https://pytorch.org/get-started/).
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-
-# Install PyTorch matching your CUDA (example only):
-# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-
-pip install accelerate lightning diffusers transformers peft safetensors datasets pyyaml pillow opencv-python psutil prodigyopt wandb
+conda env create -f environment.yml
+conda activate scale-dit
 ```
-
-## Training scripts
-
-Entrypoint: `src/train/train.py`
-
-This repo is currently structured to generate sample images during a Lightning run (via `src/train/callbacks.py`).
+To install the sparse attention kernel, please follow the installation instructions provided by SageAttention: [https://github.com/thu-ml/SpargeAttn/tree/main](https://github.com/thu-ml/SpargeAttn/tree/main).
 
 ## Inference (quickstart)
 
@@ -81,21 +83,29 @@ Use the provided config:
 
 - `train/config/inference.yaml`
 
+You can modify the number of '''hr_inference_steps''' in the config file to get better results / faster inference.
+
 Run:
 
 ```bash
 export XFL_CONFIG="./train/config/inference.yaml"
 accelerate launch -m src.train.train --disable_wandb
 ```
-
-Outputs:
-
-```text
-runs/<run_name><timestamp>/
-  config.yaml
-  output/   (images)
-  ckpt/     (saved LoRA weights)
+or
+```bash
+accelerate config # use bf16 precision
+sh script/inference.sh
 ```
+
+You can modify the test prompts in the `train/config/prompt.txt` file. (which is loaded in the `src/train/callbacks.py` file line 120 you can modify the path to the file if you want to use your own prompts.)
+
+## Training scripts
+
+Run:
+'''bash
+accelerate config # use bf16 precision and set the number of GPUs you want to use
+sh script/train.sh
+'''
 
 ## Repo layout
 
@@ -104,9 +114,6 @@ runs/<run_name><timestamp>/
 - `train/config/`: example configs/prompts
 - `train/script/`: convenience launch scripts
 
-## Security / secrets
-
-- Don’t commit tokens (e.g. `WANDB_API_KEY`). Use environment variables instead.
 
 ## Citation
 

@@ -117,7 +117,10 @@ class TrainingCallback(L.Callback):
                      "infinite library dreamscape with bookshelves stretching endlessly in all directions, floating books with glowing pages, staircases that lead to impossible angles, reading alcoves suspended in mid-air, warm golden light emanating from ancient tomes, scholars with flowing robes studying at levitating desks, magical symbols floating through the air, knowledge made visible as swirling streams of text and equations, M.C. Escher-inspired impossible geometry.",
                      ]
             # Read test prompts from file
-        testlist_path = "" # you can put your own test prompts here (txt file)
+        if pl_module.model_config.get("train", False):     
+            testlist_path = "train/config/prompt.txt" # you can put your own test prompts here (txt file)
+        else:
+            testlist_path = ""
         try:
             with open(testlist_path, 'r', encoding='utf-8') as f:
                 test_list = [line.strip() for line in f if line.strip()]

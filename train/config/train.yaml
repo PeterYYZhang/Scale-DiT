@@ -1,12 +1,11 @@
 flux_path: "black-forest-labs/FLUX.1-dev"
 dtype: "bfloat16"
 #### New lora
-lora_path: "checkpoints/full_lora/pytorch_lora_weights.safetensors" # you can put your own lora path here
-# lora_path: null
+lora_path: null
 model:
   patch_size: 16
-  image_size: [4096, 4096]
-  joint_denoise_size: [1024, 1024]  
+  image_size: [1024, 1024]
+  joint_denoise_size: [256, 256] 
   text_seq_len: 512 #512
   downsample_factor: 4
   window_size: [256, 256]
@@ -24,7 +23,7 @@ model:
   # Block-Sparse Attention parameters
   use_block_sparse_attention: false
   # Sage blocksparse attention (CUDA)
-  use_sage_blocksparse: true
+  use_sage_blocksparse: false
   sage_blk_q: 64
   sage_blk_k: 64
   sage_kernel_blk_q: 128
@@ -37,8 +36,9 @@ model:
   finetuned_vae_path: null
 
 
+
 train:
-  run_name: "infer-sage"
+  run_name: "train"
   batch_size: 1
   accumulate_grad_batches: 8
   dataloader_workers: 8
@@ -53,9 +53,9 @@ train:
 
   dataset:
     name: "1kimages"
-    target_size: 4096
-    image_height: 4096
-    image_width: 4096
+    target_size: 1024
+    image_height: 1024
+    image_width: 1024
     drop_text_prob: 0.1
     urls: 
       - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_1024_10K/data_000000.tar"
