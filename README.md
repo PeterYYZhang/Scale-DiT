@@ -78,7 +78,7 @@ conda activate scale-dit
 To install the sparse attention kernel, please follow the installation instructions provided by SageAttention: [https://github.com/thu-ml/SpargeAttn/tree/main](https://github.com/thu-ml/SpargeAttn/tree/main).
 
 ## Inference (quickstart)
-Please download the LoRA checkpoint from [here](https://huggingface.co/datasets/yuyao-zhang/Scale-DiT/blob/main/checkpoints/full_lora/pytorch_lora_weights.safetensors) and place it in the `checkpoints` directory.
+Please download the LoRA checkpoint from [here](https://drive.google.com/drive/folders/1dSlbqCOErwTyHZ-BenAabZv49ylEzHic?usp=share_link) and place it in the `checkpoints` directory.
 
 Use the provided config:
 
