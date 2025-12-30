@@ -2,7 +2,7 @@
 
 [![arXiv](https://img.shields.io/badge/arXiv-2510.16325-b31b1b.svg)](https://arxiv.org/abs/2510.16325)
 [![PDF](https://img.shields.io/badge/PDF-2510.16325-b31b1b.svg)](https://arxiv.org/pdf/2510.16325)
-[![Page](https://img.shields.io/badge/Page-https://peteryyzhang.github.io/Scale-DiT-page/-b31b1b.svg)](https://peteryyzhang.github.io/Scale-DiT-page/)
+[![Project Website](https://img.shields.io/badge/Project%20Page-Scale--DiT-blue)](https://peteryyzhang.github.io/Scale-DiT-page/)
 
 Official code for **Scale-DiT** ([arXiv:2510.16325](https://arxiv.org/abs/2510.16325)):
 *Yuyao Zhang, Yu-Wing Tai*.
