@@ -1,6 +1,7 @@
 flux_path: "black-forest-labs/FLUX.1-dev"
 dtype: "bfloat16"
 #### New lora
+# lora_path: "/scratch/yuyao/HiHi_T2I/zruns/train_coarse20251123-224743/ckpt/8000/pytorch_lora_weights.safetensors"
 lora_path: null
 model:
   patch_size: 16
@@ -20,6 +21,9 @@ model:
   ntk_factor: 10.0
   freq_filtering: false
   use_sliding_window: true
+  # Optional: path to a precomputed dense attention mask (bool tensor of shape [L, L]).
+  # If unset/null, the mask is built from config at runtime.
+  precomputed_attn_mask_path: null
   # Block-Sparse Attention parameters
   use_block_sparse_attention: false
   # Sage blocksparse attention (CUDA)
@@ -49,16 +53,16 @@ train:
   gradient_checkpointing: true
   save_path: "runs"
   gradient_clip_val: 0.1
-  print_every_n_steps: 10  
+  print_every_n_steps: 1 
 
   dataset:
-    name: "1kimages"
+    name: "4kimages"
     target_size: 1024
     image_height: 1024
     image_width: 1024
     drop_text_prob: 0.1
     urls: 
-      - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_1024_10K/data_000000.tar"
+      - "https://huggingface.co/datasets/zhang0jhon/Aesthetic-Train-V2/resolve/main/train/train.tar"
 
   wandb:
     project: "Hierarchical-attn-diff"

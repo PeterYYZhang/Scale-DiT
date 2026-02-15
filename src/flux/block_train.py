@@ -35,6 +35,76 @@ _BLOCK_MASK_CACHE: Dict[Tuple, Tuple[torch.Tensor, torch.Tensor]] = {}
 _PRECOMPUTED_DENSE_MASK: Optional[torch.Tensor] = None
 
 
+def _normalize_attn_mask_for_scores(
+    attn_mask: Optional[torch.Tensor],
+    q_len: int,
+    k_len: int,
+    device: torch.device,
+) -> Optional[torch.Tensor]:
+    """
+    Make an attention mask broadcastable to attention scores of shape [B, H, q_len, k_len].
+
+    This codebase sometimes loads/builds masks using config-derived sizes that can drift
+    from the true token sequence lengths (e.g. different packing/tiling). When that
+    happens, `masked_fill` will crash with a shape mismatch. We defensively crop/pad
+    the last 2 dims to match (q_len, k_len).
+
+    - For boolean masks: True == keep, False == mask out.
+    - For additive masks: values are added to scores; padding uses 0.
+    """
+    if attn_mask is None:
+        return None
+
+    attn_mask = attn_mask.to(device, non_blocking=True)
+
+    if attn_mask.ndim == 2:
+        mq, mk = attn_mask.shape
+        # Fast path
+        if mq == q_len and mk == k_len:
+            return attn_mask
+
+        # Crop if too large
+        cropped = attn_mask[: min(mq, q_len), : min(mk, k_len)]
+
+        # Pad if too small
+        pad_q = q_len - cropped.shape[0]
+        pad_k = k_len - cropped.shape[1]
+        if pad_q > 0 or pad_k > 0:
+            if cropped.dtype == torch.bool:
+                fill = True
+            else:
+                fill = 0
+            out = torch.full((q_len, k_len), fill_value=fill, dtype=cropped.dtype, device=device)
+            out[: cropped.shape[0], : cropped.shape[1]] = cropped
+            return out
+
+        return cropped
+
+    if attn_mask.ndim == 4:
+        # [B, H, Q, K] (or broadcastable variants)
+        mq, mk = attn_mask.shape[-2], attn_mask.shape[-1]
+        if mq == q_len and mk == k_len:
+            return attn_mask
+
+        cropped = attn_mask[..., : min(mq, q_len), : min(mk, k_len)]
+        pad_q = q_len - cropped.shape[-2]
+        pad_k = k_len - cropped.shape[-1]
+        if pad_q > 0 or pad_k > 0:
+            if cropped.dtype == torch.bool:
+                fill = True
+            else:
+                fill = 0
+            out_shape = (*cropped.shape[:-2], q_len, k_len)
+            out = torch.full(out_shape, fill_value=fill, dtype=cropped.dtype, device=device)
+            out[..., : cropped.shape[-2], : cropped.shape[-1]] = cropped
+            return out
+
+        return cropped
+
+    # Unknown mask rank; let downstream throw a clearer error
+    return attn_mask
+
+
 def _build_mask(
     model_config: Dict[str, Any],
     # Newly added codes
@@ -470,13 +540,14 @@ def _attn_forward_impl(
         BLOCK_SPARSE_ATTENTION_AVAILABLE and model_config.get("use_block_sparse_attention", False)
     )
     if low_res_guidance is not None and not use_blocksparse:
-        # Prefer loading and caching a precomputed dense mask for speed
-        precomputed_path = "/scratch/yuyao/HiHi_T2I/src_new/flux/attn_masks/mask_expanded_128x64_test-new.pt"
+        # Optionally load a precomputed dense mask for speed (must match current token lengths).
+        # NOTE: previously this was hardcoded to a user-specific path, which breaks portability.
+        precomputed_path = model_config.get("precomputed_attn_mask_path", "/scratch/yuyao/Scale-DiT/src/flux/attn_masks/mask_expanded_128x64_test-new.pt")
         global _PRECOMPUTED_DENSE_MASK
-        if os.path.exists(precomputed_path):
+        if precomputed_path is not None and os.path.exists(precomputed_path):
             if _PRECOMPUTED_DENSE_MASK is None:
                 _PRECOMPUTED_DENSE_MASK = torch.load(precomputed_path, map_location="cpu")
-            attn_mask = _PRECOMPUTED_DENSE_MASK.to(query.device, non_blocking=True)
+            attn_mask = _PRECOMPUTED_DENSE_MASK
         else:
             attn_mask = _build_mask(
                 model_config=model_config,
@@ -511,7 +582,7 @@ def _attn_forward_impl(
                 # print(f"Proportional attention scale: {scale}")
             hidden_states = F.scaled_dot_product_attention(
                 query, key, value,
-                attn_mask=attn_mask,
+                attn_mask=_normalize_attn_mask_for_scores(attn_mask, query.shape[2], key.shape[2], query.device),
                 dropout_p=0.0,
                 scale=attn.scale,
             )
@@ -597,6 +668,7 @@ def _attn_forward_impl(
         else:
             scores = torch.matmul(query, key.transpose(-2, -1)) * attn.scale
             if attn_mask is not None:
+                attn_mask = _normalize_attn_mask_for_scores(attn_mask, scores.shape[-2], scores.shape[-1], scores.device)
                 if attn_mask.dtype == torch.bool:
                     # score_copy = scores.clone()
                     scores = scores.masked_fill(attn_mask.logical_not(), -torch.inf)
@@ -607,7 +679,7 @@ def _attn_forward_impl(
     else:
         hidden_states = F.scaled_dot_product_attention(
             query, key, value,
-            attn_mask=attn_mask,
+            attn_mask=_normalize_attn_mask_for_scores(attn_mask, query.shape[2], key.shape[2], query.device),
             dropout_p=0.0,
             scale=attn.scale,
         )

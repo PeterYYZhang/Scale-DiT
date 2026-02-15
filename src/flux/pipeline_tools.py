@@ -93,6 +93,7 @@ def FluxPosEmbedForward(
     pos_embed_func,
     ids: torch.Tensor,
     ntk_factor: float=1.0,
+    theta: float=10000.0,
 ):
     n_axes = ids.shape[-1]
     cos_out = []
@@ -107,7 +108,8 @@ def FluxPosEmbedForward(
             repeat_interleave_real=True,
             use_real=True,
             freqs_dtype=freqs_dtype,
-            ntk_factor=ntk_factor
+            ntk_factor=ntk_factor,
+            theta=theta,
         )
         cos_out.append(cos)
         sin_out.append(sin)

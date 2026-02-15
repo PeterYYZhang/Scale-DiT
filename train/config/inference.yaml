@@ -1,17 +1,28 @@
 flux_path: "black-forest-labs/FLUX.1-dev"
 dtype: "bfloat16"
 #### New lora
-lora_path: "checkpoints/full_lora/pytorch_lora_weights.safetensors" # you can put your own lora path here
+# lora_path: "checkpoints/full_lora/pytorch_lora_weights.safetensors" # you can put your own lora path here
+lora_path: "/scratch/yuyao/HiHi_T2I/zruns/train_coarse20251123-224743/ckpt/8000/pytorch_lora_weights.safetensors"
+# lora_path: "/scratch/yuyao/Scale-DiT/runs/train20260208-195815/ckpt/37000/pytorch_lora_weights.safetensors" #4K fine-tuned lora
 # lora_path: null
 model:
+  seed: 42
   patch_size: 16
-  image_size: [4096, 4096]
-  joint_denoise_size: [1024, 1024]  
+  image_size: [6144, 6144]
+  joint_denoise_size: [1536, 1536]  
   text_seq_len: 512 #512
   downsample_factor: 4
-  window_size: [256, 256]
+  window_size: [256, 256] 
   use_flash_attention: false
   joint_denoise: true
+  # Cache the LR guidance x_embedder projection once (saves per-step projection time,
+  # but keeps the projected tensor alive across steps -> higher steady VRAM).
+  cache_low_res_guidance_proj: false
+  # Treat low-res guidance tokens as a fixed conditioning branch (OminiControl2-style):
+  # - do not update LR tokens inside transformer blocks
+  # - allows caching LR branch Q/K/V projections per attention layer across denoising steps
+  low_res_guidance_as_condition: false
+  cache_low_res_guidance_qkv: true
   scale_PE: true
   interpolation_init: true
   # Attention masking parameters
@@ -19,6 +30,7 @@ model:
   hi_res_attend_scale: "all"  # Controls how high-res image tokens attend to low-res tokens ("all" or "limited")
   # Position embedding parameters
   ntk_factor: 10.0
+  theta: 10000.0
   freq_filtering: false
   use_sliding_window: true
   # Block-Sparse Attention parameters
@@ -35,6 +47,11 @@ model:
   # finetuned vae
   finetuned_vae: false
   finetuned_vae_path: null
+  guidance_schedule: "cosine_decay" # "cosine_hp_decay" "cosine_decay" "cosine_shift" "constant" "costant_hp" "disable"
+  # guidance_schedule: "disable"
+  dwt_level: 1
+  dwt_wavelet: "haar"
+  print_gflops: true
 
 
 train:
@@ -47,15 +64,15 @@ train:
   max_steps: -1
   max_epochs: -1  # Maximum number of epochs (-1 for unlimited)
   gradient_checkpointing: true
-  save_path: "runs"
+  save_path: "run-resubmission"
   gradient_clip_val: 0.1
   print_every_n_steps: 10  
 
   dataset:
     name: "1kimages"
-    target_size: 4096
-    image_height: 4096
-    image_width: 4096
+    target_size: 6144 
+    image_height: 6144
+    image_width: 6144
     drop_text_prob: 0.1
     urls: 
       - "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_1024_10K/data_000000.tar"

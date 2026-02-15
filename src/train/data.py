@@ -135,18 +135,34 @@ class ImageConditionDataset(Dataset):
         #     raise ValueError(f"Item {idx} has no image or image is None")
         # if "prompt" not in item or item["prompt"] is None:
         #     raise ValueError(f"Item {idx} has no prompt or prompt is None")
+        hires = True
         try:
             image = item["image"]
             text = item["prompt"]
+            hires = False
         except:
             image = item["jpg"]
-            text = item["json"]["prompt"]
+            try:
+                text = item["json"]["prompt"]
+            except:
+                text = ""
 
         # If the image has an alpha channel, convert it to RGB
         if image.mode == "RGBA":
             image = image.convert("RGB")
-
-        image = image.resize((self.target_size, self.target_size)).convert("RGB")
+        if hires:
+            # Apply random crop of target_size x target_size to the image
+            width, height = image.size
+            if width > self.target_size and height > self.target_size:
+                left = random.randint(0, width - self.target_size)
+                upper = random.randint(0, height - self.target_size)
+                right = left + self.target_size
+                lower = upper + self.target_size
+                image = image.crop((left, upper, right, lower))
+            else:
+                image = image.resize((self.target_size, self.target_size)).convert("RGB")
+        else:
+            image = image.resize((self.target_size, self.target_size)).convert("RGB")
         description = text
 
         # Randomly drop text or image

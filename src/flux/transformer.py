@@ -99,7 +99,29 @@ def tranformer_forward(
     # with enable_only_lora((self.x_embedder,), "urae"):
         hidden_states = self.x_embedder(hidden_states)
     if low_res_guidance is not None:     # need to use lora here
-        low_res_guidance = self.x_embedder(low_res_guidance)
+        # Optional: cache the projected LR guidance tokens across denoising steps.
+        # This saves repeated `x_embedder(low_res_guidance)` calls when the LR latents
+        # are constant across steps, at the cost of keeping the projected tensor alive.
+        if (not self.training) and model_config.get("cache_low_res_guidance_proj", False):
+            cache = getattr(self, "_lr_guidance_x_embed_cache", None)
+            if cache is None:
+                cache = {}
+                setattr(self, "_lr_guidance_x_embed_cache", cache)
+
+            cache_key = (
+                id(low_res_guidance),
+                tuple(low_res_guidance.shape),
+                str(low_res_guidance.dtype),
+                str(low_res_guidance.device),
+                float(lora_scale),
+            )
+            cached = cache.get(cache_key, None)
+            if cached is None:
+                cached = self.x_embedder(low_res_guidance)
+                cache[cache_key] = cached
+            low_res_guidance = cached
+        else:
+            low_res_guidance = self.x_embedder(low_res_guidance)
 
     timestep = timestep.to(hidden_states.dtype) * 1000
 
@@ -146,9 +168,10 @@ def tranformer_forward(
         
     ids = torch.cat((txt_ids, img_ids, low_res_img_ids), dim=0) if low_res_img_ids is not None else torch.cat((txt_ids, img_ids), dim=0)
     if low_res_img_ids is not None:
-        image_rotary_emb = FluxPosEmbedForward(self.pos_embed, ids, model_config.get("ntk_factor", 1.0))
+        image_rotary_emb = FluxPosEmbedForward(self.pos_embed, ids, model_config.get("ntk_factor", 1.0), model_config.get("theta", 10000.0))
     else:
-        image_rotary_emb = self.pos_embed(ids)
+        # image_rotary_emb = self.pos_embed(ids)
+        image_rotary_emb = FluxPosEmbedForward(self.pos_embed, ids, model_config.get("ntk_factor", 1.0))
 
 
 

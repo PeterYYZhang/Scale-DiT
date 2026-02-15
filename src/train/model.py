@@ -46,12 +46,13 @@ class FluxHierarchicalModel(L.LightningModule):
         self.transformer.gradient_checkpointing = gradient_checkpointing
         self.transformer.train()
         if self.model_config.get("finetuned_vae", False):
-            local_vae = AutoencoderKL.from_pretrained(self.model_config.get("finetuned_vae_path"), subfolder="vae", torch_dtype=torch.bfloat16)
+            # local_vae = AutoencoderKL.from_pretrained(self.model_config.get("finetuned_vae_path"), subfolder="vae", torch_dtype=torch.bfloat16)
+            local_vae = AutoencoderKL.from_pretrained("Owen777/UltraFlux-v1",subfolder="vae", torch_dtype=torch.bfloat16)
             self.flux_pipe.vae2 = local_vae
             self.flux_pipe.vae2.to(device).to(dtype)
-            # local_vae = AutoencoderKL.from_pretrained("Owen777/UltraFlux-v1",subfolder="vae", torch_dtype=torch.bfloat16)
+    
         self.flux_pipe.scheduler.config.use_dynamic_shifting = False
-        self.flux_pipe.scheduler.config.time_shift = 10
+        # self.flux_pipe.scheduler.config.time_shift = 10
         # Freeze the Flux pipeline
         self.flux_pipe.text_encoder.requires_grad_(False).eval()
         self.flux_pipe.text_encoder_2.requires_grad_(False).eval()
@@ -59,7 +60,7 @@ class FluxHierarchicalModel(L.LightningModule):
 
         # Initialize LoRA layers
         self.lora_layers = self.init_lora(lora_path, lora_config)
-        self.flux_pipe.scheduler.config.max_image_seq_len = 65536
+        self.flux_pipe.scheduler.config.max_image_seq_len = 65536*4
         
         self.to(device).to(dtype)
 

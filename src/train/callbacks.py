@@ -112,14 +112,16 @@ class TrainingCallback(L.Callback):
 
         # default test prompts
         test_list = [ 
-                     "Realistic Persian cat relaxing on a velvet sofa, soft indoor lighting.",
-                     "vast underground cathedral complex, soaring gothic arches extending into darkness, massive stone pillars with intricate carvings, stained glass windows filtering colored light from above, ancient ceremonial altars, shadowy alcoves with flickering candles, elaborate pipe organ with golden pipes, worn stone floors with mosaic patterns, mysterious atmosphere with dust motes dancing in colored light beams, echoing vastness.",
-                     "infinite library dreamscape with bookshelves stretching endlessly in all directions, floating books with glowing pages, staircases that lead to impossible angles, reading alcoves suspended in mid-air, warm golden light emanating from ancient tomes, scholars with flowing robes studying at levitating desks, magical symbols floating through the air, knowledge made visible as swirling streams of text and equations, M.C. Escher-inspired impossible geometry.",
+                     "An elven queen wearing transparent silk in a fantasy character portrait.",
+                     "Ultra-sharp view of a city staircase at 5PM: graffiti scratched into metal, spilled soda sticky on the step, a wilted wildflower pressed against the railing.",
+                     "A surrealist vision: vending machine filled with mismatched mittens; each window reflects a different lost memory in photorealistic clarity.",
                      ]
-            # Read test prompts from file
+        # Read test prompts from file
         if pl_module.model_config.get("train", False):     
-            testlist_path = "train/config/prompt.txt" # you can put your own test prompts here (txt file)
+            testlist_path = "/scratch/yuyao/Scale-DiT/train/config/prompt.txt" # you can put your own test prompts here (txt file)
+            testlist_path = ""
         else:
+            testlist_path = "/scratch/yuyao/Scale-DiT/train/config/prompt.txt"
             testlist_path = ""
         try:
             with open(testlist_path, 'r', encoding='utf-8') as f:

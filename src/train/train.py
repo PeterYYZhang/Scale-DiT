@@ -67,13 +67,21 @@ def main():
         print(f"Filtered dataset size: {len(dataset)}")
     else:
         print("Loading original dataset and filtering...")
-        dataset = load_dataset(
-            "webdataset",
-            data_files=dataset_config.get("urls", []),
-            split="train",
-            cache_dir="datasets/extracted_data",
-            num_proc=32,
-        )
+        if dataset_config.get("name", "1kimages") == "1kimages":
+            dataset = load_dataset(
+                "webdataset",
+                data_files=dataset_config.get("urls", []),
+                split="train",
+                cache_dir="datasets/extracted_data",
+                num_proc=32,
+            )
+        else:
+            dataset = load_dataset(
+                "zhang0jhon/Aesthetic-Train-V2",
+                split="train",
+                cache_dir="datasets/extracted_data",
+                num_proc=32,
+            )
 
         # Filter dataset: TODO: add filtering logic here
         def filter_none_values(example)->bool:
@@ -134,6 +142,7 @@ def main():
         max_steps=training_config.get("max_steps", -1),
         max_epochs=training_config.get("max_epochs", -1),
         gradient_clip_val=training_config.get("gradient_clip_val", 0.5),
+        # strategy=DDPStrategy(find_unused_parameters=True),
     )
 
     setattr(trainer, "training_config", training_config)
