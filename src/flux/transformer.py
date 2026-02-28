@@ -98,7 +98,9 @@ def tranformer_forward(
     with enable_lora((self.x_embedder,), False):
     # with enable_only_lora((self.x_embedder,), "urae"):
         hidden_states = self.x_embedder(hidden_states)
-    if low_res_guidance is not None:     # need to use lora here
+    if low_res_guidance is not None:
+        if low_res_guidance.ndim == 3:
+            low_res_guidance = low_res_guidance[0]
         # Optional: cache the projected LR guidance tokens across denoising steps.
         # This saves repeated `x_embedder(low_res_guidance)` calls when the LR latents
         # are constant across steps, at the cost of keeping the projected tensor alive.
@@ -157,10 +159,6 @@ def tranformer_forward(
         img_ids = img_ids[0]
     if low_res_img_ids is not None:
         if low_res_img_ids.ndim == 3:
-            logger.warning(
-                "Passing `low_res_guidance` 3d torch.Tensor is deprecated."
-                "Please remove the batch dimension and pass it as a 2d torch Tensor"
-            )
             low_res_img_ids = low_res_img_ids[0]
         if model_config.get("scale_PE", False):
             hr_lr_scale = model_config.get("image_size", [1024, 1024])[0] // model_config.get("joint_denoise_size", [256, 256])[0]
@@ -168,7 +166,9 @@ def tranformer_forward(
         
     ids = torch.cat((txt_ids, img_ids, low_res_img_ids), dim=0) if low_res_img_ids is not None else torch.cat((txt_ids, img_ids), dim=0)
     if low_res_img_ids is not None:
-        image_rotary_emb = FluxPosEmbedForward(self.pos_embed, ids, model_config.get("ntk_factor", 1.0), model_config.get("theta", 10000.0))
+        image_rotary_emb = FluxPosEmbedForward(self.pos_embed, ids, 
+        model_config.get("ntk_factor", 1.0), model_config.get("theta", 10000.0),
+        linear_factor=0.5)
     else:
         # image_rotary_emb = self.pos_embed(ids)
         image_rotary_emb = FluxPosEmbedForward(self.pos_embed, ids, model_config.get("ntk_factor", 1.0))

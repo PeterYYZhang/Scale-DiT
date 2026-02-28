@@ -2,6 +2,8 @@ import torch
 from torch import Tensor
 from diffusers.utils import logging
 from diffusers.pipelines import FluxPipeline
+from diffusers.pipelines.flux2.pipeline_flux2_klein import logger as logger2
+from diffusers.pipelines.flux2.pipeline_flux2_klein import Flux2KleinPipeline
 from torchvision.transforms import GaussianBlur
 from diffusers.pipelines.flux.pipeline_flux import logger
 from diffusers.models.embeddings import get_1d_rotary_pos_embed
@@ -54,6 +56,63 @@ def prepare_text_input(pipeline: FluxPipeline, prompts, max_sequence_length=512)
     logger.setLevel(logging.WARNING)
     return prompt_embeds, pooled_prompt_embeds, text_ids
 
+def prepare_text_input2(
+    pipeline: Flux2KleinPipeline,
+    prompts,
+    max_sequence_length=512,
+    prompt_embeds=None,
+    text_encoder_out_layers=(9, 18, 27),
+):
+    logger2.setLevel(logging.ERROR)
+    device = getattr(pipeline, "device", None) or getattr(pipeline, "_execution_device", None)
+    (
+        prompt_embeds,
+        text_ids,
+    ) = pipeline.encode_prompt(
+        prompt=prompts,
+        prompt_embeds=prompt_embeds,
+        device=device,
+        num_images_per_prompt=1,
+        max_sequence_length=max_sequence_length,
+        text_encoder_out_layers=text_encoder_out_layers,
+    )
+    logger2.setLevel(logging.WARNING)
+    return prompt_embeds, text_ids
+
+from diffusers.pipelines.flux2.pipeline_flux2_klein import retrieve_latents
+def encode_images_tiled2(pipeline: Flux2KleinPipeline, image: Tensor):
+    """
+    Encode a batch of images to FLUX2 latent tokens + ids.
+
+    This mirrors the upstream `Flux2KleinPipeline._encode_vae_image` logic
+    (VAE encode -> patchify -> BN normalize), then packs to token form and
+    constructs per-token position ids.
+    """
+    if image.ndim != 4:
+        image = image.unsqueeze(0)
+
+    # `_encode_vae_image` expects its input on the VAE's device/dtype (see upstream prepare_image_latents).
+    image = image.to(device=pipeline.vae.device, dtype=pipeline.vae.dtype)
+
+    # Use tiling for high-res safety; restore original setting after.
+    pipeline.vae.enable_tiling()
+    try:
+        # Returns patchified+BN-normalized latents: (B, 128, H/16, W/16) for 1024x1024 inputs.
+        generator = torch.Generator(device=pipeline.vae.device)
+        image_latents = pipeline._encode_vae_image(image=image, generator=generator)
+    finally:
+        pipeline.vae.disable_tiling()
+
+    # Build ids on the patchified latent grid (matches packed token layout).
+    ids = pipeline._prepare_latent_ids(image_latents).to(device=pipeline.device)
+
+    # Pack to token form for the transformer: (B, H*W, C)
+    tokens = pipeline._pack_latents(image_latents).to(device=pipeline.device, dtype=pipeline.dtype)
+
+    return tokens, ids
+
+
+
 def encode_images_tiled(pipeline: FluxPipeline, images: Tensor):
     """
     Encodes images using VAE tiling to support high-resolution inputs.
@@ -94,6 +153,7 @@ def FluxPosEmbedForward(
     ids: torch.Tensor,
     ntk_factor: float=1.0,
     theta: float=10000.0,
+    linear_factor: int=1,
 ):
     n_axes = ids.shape[-1]
     cos_out = []
@@ -109,6 +169,7 @@ def FluxPosEmbedForward(
             use_real=True,
             freqs_dtype=freqs_dtype,
             ntk_factor=ntk_factor,
+            linear_factor = linear_factor,
             theta=theta,
         )
         cos_out.append(cos)
@@ -116,6 +177,38 @@ def FluxPosEmbedForward(
     freqs_cos = torch.cat(cos_out, dim=-1).to(ids.device)
     freqs_sin = torch.cat(sin_out, dim=-1).to(ids.device)
     return freqs_cos, freqs_sin        
+
+def Flux2PosEmbedForward(
+    pos_embed_func,
+    ids: torch.Tensor,
+    ntk_factor: float=1.0,
+    theta: float=2000.0,
+    linear_factor: int=1,
+):
+    # Expected ids shape: [S, len(self.axes_dim)]
+        cos_out = []
+        sin_out = []
+        pos = ids.float()
+        is_mps = ids.device.type == "mps"
+        is_npu = ids.device.type == "npu"
+        freqs_dtype = torch.float32 if (is_mps or is_npu) else torch.float64
+        # Unlike Flux 1, loop over len(self.axes_dim) rather than ids.shape[-1]
+        for i in range(len(pos_embed_func.axes_dim)):
+            cos, sin = get_1d_rotary_pos_embed(
+                pos_embed_func.axes_dim[i],
+                pos[..., i],
+                ntk_factor=ntk_factor,
+                linear_factor=linear_factor,
+                theta=theta,
+                repeat_interleave_real=True,
+                use_real=True,
+                freqs_dtype=freqs_dtype,
+            )
+            cos_out.append(cos)
+            sin_out.append(sin)
+        freqs_cos = torch.cat(cos_out, dim=-1).to(ids.device)
+        freqs_sin = torch.cat(sin_out, dim=-1).to(ids.device)
+        return freqs_cos, freqs_sin
 
 def create_butterworth_filter(shape, cutoff=0.3, order=2, device=torch.device("cpu"), dtype=torch.bfloat16):
     """
@@ -157,20 +250,42 @@ def apply_freq_filter(x, filter_mask, low_pass=True, method="fft"):
     else:
         raise ValueError(f"Invalid method: {method}, not implemented.")
 
-def save_image(self, latents, height, width, output_path, output_type, ):
-    latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
-    latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
-    image = self.vae.decode(latents.to(self.vae.dtype), return_dict=False)[0]
-    image = self.image_processor.postprocess(image, output_type=output_type)
-    image[0].save(output_path)
-    return image[0]
+def save_image(self, latents, height, width, output_path, output_type, latent_ids=None):
+    if latent_ids is None:
+        latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
+        latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
+        image = self.vae.decode(latents.to(self.vae.dtype), return_dict=False)[0]
+        image = self.image_processor.postprocess(image, output_type=output_type)
+        image[0].save(output_path)
+        return image[0]
+    else:
+        latents = self._unpack_latents_with_ids(latents, latent_ids)
 
-def decode_vae_latents_tiled(self, latents, height, width, output_type, ):
-    latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
-    # self.vae.enable_tiling()
-    latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
-    image = self.vae.decode(latents.to(self.vae.dtype), return_dict=False)[0]
-    # self.vae.disable_tiling()
+        latents_bn_mean = self.vae.bn.running_mean.view(1, -1, 1, 1).to(latents.device, latents.dtype)
+        latents_bn_std = torch.sqrt(self.vae.bn.running_var.view(1, -1, 1, 1) + self.vae.config.batch_norm_eps).to(
+            latents.device, latents.dtype
+        )
+        latents = latents * latents_bn_std + latents_bn_mean
+        latents = self._unpatchify_latents(latents)
+        image = self.vae.decode(latents.to(self.vae.dtype), return_dict=False)[0]
+        image = self.image_processor.postprocess(image, output_type=output_type)
+        image[0].save(output_path)
+        return image[0]
+
+def decode_vae_latents_tiled(self, latents, height, width, output_type, latent_ids=None):
+    if latent_ids is None:
+        latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
+        latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
+        image = self.vae.decode(latents.to(self.vae.dtype), return_dict=False)[0]
+    else:
+        latents = self._unpack_latents_with_ids(latents, latent_ids)
+        latents_bn_mean = self.vae.bn.running_mean.view(1, -1, 1, 1).to(latents.device, latents.dtype)
+        latents_bn_std = torch.sqrt(self.vae.bn.running_var.view(1, -1, 1, 1) + self.vae.config.batch_norm_eps).to(
+            latents.device, latents.dtype
+        )
+        latents = latents * latents_bn_std + latents_bn_mean
+        latents = self._unpatchify_latents(latents)
+        image = self.vae.decode(latents.to(self.vae.dtype), return_dict=False)[0]
     image = self.image_processor.postprocess(image, output_type=output_type)
     return image
 

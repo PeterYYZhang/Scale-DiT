@@ -5,8 +5,8 @@ import csv
 import torch.nn.functional as F
 import pywt
 from PIL import Image
-from diffusers.pipelines import FluxPipeline
-from .transformer import tranformer_forward
+from diffusers.pipelines.flux2.pipeline_flux2_klein import Flux2KleinPipeline
+from .transformer2 import tranformer_forward
 from typing import List, Union, Optional, Dict, Any, Callable
 from .pipeline_tools import (
     save_image,
@@ -15,9 +15,9 @@ from .pipeline_tools import (
     encode_images_tiled,
 )
 
-from diffusers.pipelines.flux.pipeline_flux import (
-    FluxPipelineOutput,
-    calculate_shift,
+from diffusers.pipelines.flux2.pipeline_flux2_klein import (
+    Flux2PipelineOutput,
+    compute_empirical_mu,
     retrieve_timesteps,
     np,
 )
@@ -151,7 +151,7 @@ def _cuda_mem_snapshot_bytes(device_index: int) -> Dict[str, float]:
 
 @torch.no_grad()
 def generate(
-    pipeline: FluxPipeline,
+    pipeline: Flux2KleinPipeline,
     config_path: str = None,
     model_config: Optional[Dict[str, Any]] = {},
     **params: dict,
@@ -191,7 +191,7 @@ def generate(
         hr_guidance_scale,
         save_path,
     ) = prepare_params(**params)
-
+    negative_prompt = "low quality, bad quality, sketches"
     self.vae.enable_tiling()
     guidance_scale = model_config.get("lr_guidance_scale", guidance_scale)
     
@@ -204,19 +204,20 @@ def generate(
     os.makedirs(save_path, exist_ok=True)
     
     # 1. Check inputs. Raise error if not correct
+    # Klein signature: (prompt, height, width, prompt_embeds=None, callback_on_step_end_tensor_inputs=None, guidance_scale=None)
+    lr_height, lr_width = model_config.get("joint_denoise_size", [256, 256])
     self.check_inputs(
-        prompt,
-        prompt_2,
-        model_config.get("joint_denoise_size", [256, 256])[0],
-        model_config.get("joint_denoise_size", [256, 256])[1],
+        prompt=prompt,
+        height=lr_height,
+        width=lr_width,
         prompt_embeds=prompt_embeds,
-        pooled_prompt_embeds=pooled_prompt_embeds,
         callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
-        max_sequence_length=max_sequence_length,
+        guidance_scale=guidance_scale,
     )
 
     self._guidance_scale = guidance_scale
-    self._joint_attention_kwargs = joint_attention_kwargs
+    # Klein pipeline uses `attention_kwargs`; keep accepting `joint_attention_kwargs` for backward compatibility.
+    self._attention_kwargs = joint_attention_kwargs
     self._interrupt = False
 
     # 2. Define call parameters
@@ -230,66 +231,81 @@ def generate(
     device = self._execution_device
 
     # Ensure text encoder is on the correct device before encoding
-    if hasattr(self, 'text_encoder') and self.text_encoder is not None:
+    if hasattr(self, "text_encoder") and self.text_encoder is not None:
         self.text_encoder.to(device)
-    if hasattr(self, 'text_encoder_2') and self.text_encoder_2 is not None:
+    if hasattr(self, "text_encoder_2") and self.text_encoder_2 is not None:
         self.text_encoder_2.to(device)
 
-    lora_scale = (
-        self.joint_attention_kwargs.get("scale", None)
-        if self.joint_attention_kwargs is not None
-        else None
-    )
-    (
-        prompt_embeds,
-        pooled_prompt_embeds,
-        text_ids,
-    ) = self.encode_prompt(
-        prompt=prompt,
-        prompt_2=prompt_2,
-        prompt_embeds=prompt_embeds,
-        pooled_prompt_embeds=pooled_prompt_embeds,
+    # Flux2 encodes a single prompt stream. If a secondary prompt is provided (legacy Flux API),
+    # concatenate it for best-effort compatibility.
+    effective_prompt = prompt
+    if prompt_embeds is None and prompt_2 is not None:
+        if effective_prompt is None:
+            effective_prompt = prompt_2
+        elif isinstance(effective_prompt, str) and isinstance(prompt_2, str):
+            effective_prompt = effective_prompt + "\n" + prompt_2
+        elif isinstance(effective_prompt, list) and isinstance(prompt_2, str):
+            effective_prompt = [p + "\n" + prompt_2 for p in effective_prompt]
+        elif isinstance(effective_prompt, str) and isinstance(prompt_2, list):
+            effective_prompt = [effective_prompt + "\n" + p2 for p2 in prompt_2]
+        elif isinstance(effective_prompt, list) and isinstance(prompt_2, list) and len(effective_prompt) == len(prompt_2):
+            effective_prompt = [p + "\n" + p2 for p, p2 in zip(effective_prompt, prompt_2)]
+        else:
+            raise ValueError(
+                f"Unsupported prompt/prompt_2 types: {type(effective_prompt)} and {type(prompt_2)}"
+            )
+
+    text_encoder_out_layers = tuple(model_config.get("text_encoder_out_layers", (9, 18, 27)))
+    prompt_embeds, text_ids = self.encode_prompt(
+        prompt=effective_prompt,
         device=device,
         num_images_per_prompt=num_images_per_prompt,
+        prompt_embeds=prompt_embeds,
         max_sequence_length=max_sequence_length,
-        lora_scale=lora_scale,
+        text_encoder_out_layers=text_encoder_out_layers,
     )
+    pooled_prompt_embeds = None
+    if self.do_classifier_free_guidance:
+            negative_prompt = ""
+            if prompt is not None and isinstance(prompt, list):
+                negative_prompt = [negative_prompt] * len(prompt)
+            negative_prompt_embeds, negative_text_ids = self.encode_prompt(
+                prompt=negative_prompt,
+                # prompt_embeds=negative_prompt_embeds,
+                device=device,
+                num_images_per_prompt=num_images_per_prompt,
+                max_sequence_length=max_sequence_length,
+                text_encoder_out_layers=text_encoder_out_layers,
+            )
 
     # Offload the encoder to CPU after encoding
-    if hasattr(self, 'text_encoder') and self.text_encoder is not None:
+    if hasattr(self, "text_encoder") and self.text_encoder is not None:
         self.text_encoder.to("cpu")
-    if hasattr(self, 'text_encoder_2') and self.text_encoder_2 is not None:
+    if hasattr(self, "text_encoder_2") and self.text_encoder_2 is not None:
         self.text_encoder_2.to("cpu")
 
     # 4. Prepare latent variables
     num_channels_latents = self.transformer.config.in_channels // 4
     latents, latent_image_ids = self.prepare_latents(
-        batch_size * num_images_per_prompt,
-        num_channels_latents,
-        model_config.get("joint_denoise_size", [256, 256])[0],
-        model_config.get("joint_denoise_size", [256, 256])[1],
-        prompt_embeds.dtype,
-        device,
-        generator,
-        latents,
+        batch_size=batch_size * num_images_per_prompt,
+        num_latents_channels=num_channels_latents,
+        height=model_config.get("joint_denoise_size", [256, 256])[0],
+        width=model_config.get("joint_denoise_size", [256, 256])[1],
+        dtype=prompt_embeds.dtype,
+        device=device,
+        generator=generator,
+        latents=latents,
     )
     low_res_latents_ids = latent_image_ids
     # 5. Prepare timesteps
     sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
     image_seq_len = latents.shape[1]
-    mu = calculate_shift(
-        image_seq_len,
-        self.scheduler.config.base_image_seq_len,
-        self.scheduler.config.max_image_seq_len,
-        self.scheduler.config.base_shift,
-        self.scheduler.config.max_shift,
-    )
+    mu = compute_empirical_mu(image_seq_len=image_seq_len, num_steps=num_inference_steps)
     timesteps, num_inference_steps = retrieve_timesteps(
         self.scheduler,
         num_inference_steps,
         device,
-        timesteps,
-        sigmas,
+        sigmas=sigmas,
         mu=mu,
     )
     num_warmup_steps = max(
@@ -297,12 +313,7 @@ def generate(
     )
     self._num_timesteps = len(timesteps)
 
-    # handle guidance
-    if self.transformer.config.guidance_embeds:
-        guidance = torch.tensor([guidance_scale], device=device)
-        guidance = guidance.expand(latents.shape[0])
-    else:
-        guidance = None 
+    
     # 6. Denoising loop for low-res image
     with self.progress_bar(total=num_inference_steps) as progress_bar:
         for i, t in enumerate(timesteps):
@@ -311,21 +322,41 @@ def generate(
 
             # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
             timestep = t.expand(latents.shape[0]).to(latents.dtype)
+            with self.transformer.cache_context("cond"):
+                noise_pred = tranformer_forward(
+                    self.transformer,
+                    model_config=model_config,
+                    hidden_states=latents,
+                    # YiYi notes: divide it by 1000 for now because we scale it by 1000 in the transforme rmodel (we should not keep it but I want to keep the inputs same for the model for testing)
+                    timestep=timestep / 1000,
+                    guidance=None,
+                    pooled_projections=None,
+                    encoder_hidden_states=prompt_embeds,
+                    txt_ids=text_ids,
+                    img_ids=latent_image_ids,
+                    joint_attention_kwargs=self.attention_kwargs,
+                    return_dict=False,
+                )[0]
 
-            noise_pred = tranformer_forward(
-                self.transformer,
-                model_config=model_config,
-                hidden_states=latents,
-                # YiYi notes: divide it by 1000 for now because we scale it by 1000 in the transforme rmodel (we should not keep it but I want to keep the inputs same for the model for testing)
-                timestep=timestep / 1000,
-                guidance=guidance,
-                pooled_projections=pooled_prompt_embeds,
-                encoder_hidden_states=prompt_embeds,
-                txt_ids=text_ids,
-                img_ids=latent_image_ids,
-                joint_attention_kwargs=self.joint_attention_kwargs,
-                return_dict=False,
-            )[0]
+            noise_pred = noise_pred[:, : latents.size(1) :]
+            if self.do_classifier_free_guidance:
+                with self.transformer.cache_context("uncond"):
+                    neg_noise_pred = tranformer_forward(
+                    self.transformer,
+                    model_config=model_config,
+                    hidden_states=latents,
+                    # YiYi notes: divide it by 1000 for now because we scale it by 1000 in the transforme rmodel (we should not keep it but I want to keep the inputs same for the model for testing)
+                    timestep=timestep / 1000,
+                    guidance=None,
+                    pooled_projections=None,
+                    encoder_hidden_states=negative_prompt_embeds,
+                    txt_ids=negative_text_ids,
+                    img_ids=latent_image_ids,
+                    joint_attention_kwargs=self.attention_kwargs,
+                    return_dict=False,
+                )[0]
+                neg_noise_pred = neg_noise_pred[:, : latents.size(1) :]
+                noise_pred = neg_noise_pred + guidance_scale * (noise_pred - neg_noise_pred)
 
             # compute the previous noisy sample x_t -> x_t-1
             latents_dtype = latents.dtype
@@ -354,7 +385,7 @@ def generate(
     # load the low-res image using center crop
     # low_res_path = "/scratch/yuyao/Scale-DiT/flux_linear_3.png"
     low_res_path = None
-    if low_res_path is not None:
+    if low_res_path is not None: #TODO: need to fix I hate new diffusers version
         joint_size = model_config.get("joint_denoise_size", [256, 256])
         image = Image.open(low_res_path).convert("RGB")
 
@@ -368,7 +399,7 @@ def generate(
         bottom = (height + target_h) / 2
         image = image.crop((left, top, right, bottom)).resize((joint_size[0], joint_size[1]), resample=Image.BICUBIC)
 
-        latents, _ = encode_images_tiled(self, image)
+        latents, = encode_images_tiled(self, image)
 
     # Save low-res image
     # Keep LR tokens for joint denoise guidance (no need to clone; we rebind `latents` later).
@@ -380,6 +411,7 @@ def generate(
         model_config.get("joint_denoise_size", [256, 256])[1],
         os.path.join(save_path, f"low_res_image_{prompt[:50]}.png"),
         output_type="pil",
+        latent_ids=latent_image_ids,
     )
     
     # Configure model to use BlockSparseAttention for high-res generation
@@ -390,20 +422,19 @@ def generate(
     # Build HR guidance latents efficiently (avoid VAE decode -> resize -> VAE encode).
     # We upsample *in latent space* then repack to token form.
     height, width = model_config.get("image_size", (height, width))[0], model_config.get("image_size", (height, width))[1]
+    patch_size = int(model_config.get("patch_size", 16))
     joint_h = model_config.get("joint_denoise_size", [256, 256])[0]
     joint_w = model_config.get("joint_denoise_size", [256, 256])[1]
 
-    lr_latents_spatial = self._unpack_latents(latents, joint_h, joint_w, self.vae_scale_factor)
+    # lr_latents_spatial = self._unpack_latents(latents, joint_h, joint_w, self.vae_scale_factor)
+    lr_latents_spatial = self._unpack_latents_with_ids(latents, latent_image_ids)
     # Target latent spatial size used by FLUX packing.
-    pack_h = (height // self.vae_scale_factor) * 2
-    pack_w = (width // self.vae_scale_factor) * 2
+    # For FLUX2, token grid is on the patchified latent map (image_size / patch_size).
+    pack_h = height // patch_size
+    pack_w = width // patch_size
     hr_latents_spatial = F.interpolate(lr_latents_spatial, size=(pack_h, pack_w), mode="bicubic", align_corners=False)
     latents_guidance = self._pack_latents(
         hr_latents_spatial,
-        batch_size * num_images_per_prompt,
-        num_channels_latents,
-        pack_h,
-        pack_w,
     ).to(device=device)
     # For HR generation, we want `latents` / `latent_image_ids` to reflect the HR token layout.
     # If `interpolation_init` is enabled, we will start from these guidance latents; otherwise
@@ -411,21 +442,14 @@ def generate(
     latents = latents_guidance
 
     # Prepare HR latent ids (same logic as `encode_images_tiled`, but without re-encoding).
-    latent_image_ids = self._prepare_latent_image_ids(
-        hr_latents_spatial.shape[0],
-        hr_latents_spatial.shape[2],
-        hr_latents_spatial.shape[3],
-        device,
-        self.dtype,
+    latent_image_ids = self._prepare_latent_ids(
+        latents.reshape(batch_size, -1, pack_h, pack_w),
+        # hr_latents_spatial.shape[0],
+        # hr_latents_spatial.shape[2],
+        # hr_latents_spatial.shape[3],
+        # device,
+        # self.dtype,
     )
-    if latents_guidance.shape[1] != latent_image_ids.shape[0]:
-        latent_image_ids = self._prepare_latent_image_ids(
-            hr_latents_spatial.shape[0],
-            hr_latents_spatial.shape[2] // 2,
-            hr_latents_spatial.shape[3] // 2,
-            device,
-            self.dtype,
-        )
     latent_image_ids = latent_image_ids.to(device)
 
     # For output/debugging only: an upsampled LR image on CPU (no extra GPU work).
@@ -486,25 +510,26 @@ def generate(
     )
 
     hr_permutation_idx = window_permutation(
-        H=model_config.get("image_size", [1024, 1024])[0]//16,
-        W=model_config.get("image_size", [1024, 1024])[1]//16,
+        H=model_config.get("image_size", [1024, 1024])[0] // patch_size,
+        W=model_config.get("image_size", [1024, 1024])[1] // patch_size,
         Wh=16,
         Ww=16,
     )
     inv_hr_permutation_idx = inverse_permutation(hr_permutation_idx)
-    latent_image_ids = latent_image_ids[hr_permutation_idx]
+    # import pdb; pdb.set_trace()
+    latent_image_ids = latent_image_ids[:, hr_permutation_idx, ]
     latents = latents[:, hr_permutation_idx, ]
     # Align guidance tokens to the same permutation order used for HR denoising.
     latents_guidance = latents_guidance[:, hr_permutation_idx, ].to(dtype=latents.dtype, device=device)
     if model_config.get("joint_denoise_size", [256, 256])[0] > 256:
         lr_permutation_idx = window_permutation(
-            H=model_config.get("joint_denoise_size", [256, 256])[0]//16,
-            W=model_config.get("joint_denoise_size", [256, 256])[1]//16,
+            H=model_config.get("joint_denoise_size", [256, 256])[0] // patch_size,
+            W=model_config.get("joint_denoise_size", [256, 256])[1] // patch_size,
             Wh=4,
             Ww=4,
         )
         lr_latents_copy = lr_latents_copy[:, lr_permutation_idx, ]
-        low_res_latents_ids = low_res_latents_ids[lr_permutation_idx]
+        low_res_latents_ids = low_res_latents_ids[:, lr_permutation_idx, ]
     # handle guidance
     if self.transformer.config.guidance_embeds:
         guidance = torch.tensor([hr_guidance_scale], device=device)
@@ -513,28 +538,21 @@ def generate(
         guidance = None 
 
     # Projected-flow LR guidance configuration (cosine_shift).
-    guidance_schedule = model_config.get("guidance_schedule", "cosine_shift")
+    guidance_schedule = model_config.get("guidance_schedule", "disable")
     dwt_level = int(model_config.get("dwt_level", 1))
     dwt_wavelet = model_config.get("dwt_wavelet", "haar")
-    pack_h = (height // self.vae_scale_factor) * 2
-    pack_w = (width // self.vae_scale_factor) * 2
+    pack_h = height // patch_size
+    pack_w = width // patch_size
 
     def _lowpass_tokens(tokens: torch.Tensor) -> torch.Tensor:
         """
         tokens: (B, N, D) in *permuted* HR order.
         Returns: low-frequency tokens (B, N, D) in the same permuted order, computed via DWT.
         """
-        tokens_unperm = tokens[:, inv_hr_permutation_idx, :]
-        spatial = self._unpack_latents(tokens_unperm, height, width, self.vae_scale_factor)
+        spatial = self._unpack_latents_with_ids(tokens, latent_image_ids)
         spatial_low = split_frequency_components_dwt(spatial, wavelet=dwt_wavelet, level=dwt_level)
-        tokens_low_unperm = self._pack_latents(
-            spatial_low,
-            batch_size * num_images_per_prompt,
-            num_channels_latents,
-            pack_h,
-            pack_w,
-        )
-        return tokens_low_unperm[:, hr_permutation_idx, :]
+        tokens_low = self._pack_latents(spatial_low)
+        return tokens_low[:, hr_permutation_idx, :]
 
     # HR denoising loop memory tracking (starts AFTER LR interpolation/upsampling above).
     # We reset peak stats here (right before the HR loop) so the measurements exclude
@@ -602,24 +620,49 @@ def generate(
             
             # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
             timestep = t.expand(latents.shape[0]).to(latents.dtype)
-
-            noise_pred = tranformer_forward(
-                self.transformer,
-                model_config=model_config,
-                hidden_states=latents,
-                timestep=timestep / 1000,
-                guidance=guidance,
-                pooled_projections=pooled_prompt_embeds,
-                encoder_hidden_states=prompt_embeds,
-                txt_ids=text_ids,
-                img_ids=latent_image_ids,
-                joint_attention_kwargs=self.joint_attention_kwargs,
-                return_dict=False,
-                # Newly added codes
-                low_res_guidance=lr_latents_copy,
-                low_res_img_ids=low_res_latents_ids,
-                low_res_timestep=0,
-            )[0]
+            # Remove batch dim when 3D (deprecated); transformer expects 2D
+            lr_guidance = lr_latents_copy[0] if lr_latents_copy.ndim == 3 else lr_latents_copy
+            lr_ids = low_res_latents_ids[0] if low_res_latents_ids.ndim == 3 else low_res_latents_ids
+            with self.transformer.cache_context("cond"):
+                noise_pred = tranformer_forward(
+                    self.transformer,
+                    model_config=model_config,
+                    hidden_states=latents,
+                    timestep=timestep / 1000,
+                    guidance=guidance,
+                    pooled_projections=None,
+                    encoder_hidden_states=prompt_embeds,
+                    txt_ids=text_ids,
+                    img_ids=latent_image_ids,
+                    joint_attention_kwargs=self.attention_kwargs,
+                    return_dict=False,
+                    # Newly added codes
+                    low_res_guidance=lr_guidance,
+                    low_res_img_ids=lr_ids,
+                    low_res_timestep=0,
+                )[0]
+            noise_pred = noise_pred[:, : latents.size(1) :]
+            # if self.do_classifier_free_guidance:
+            #     with self.transformer.cache_context("uncond"):
+            #         neg_noise_pred = tranformer_forward(
+            #         self.transformer,
+            #         model_config=model_config,
+            #         hidden_states=latents,
+            #         timestep=timestep / 1000,
+            #         guidance=None,
+            #         pooled_projections=None,
+            #         encoder_hidden_states=negative_prompt_embeds,
+            #         txt_ids=negative_text_ids,
+            #         img_ids=latent_image_ids,
+            #         joint_attention_kwargs=self.attention_kwargs,
+            #         return_dict=False,
+            #         # Newly added codes
+            #         low_res_guidance=lr_guidance,
+            #         low_res_img_ids=lr_ids,
+            #         low_res_timestep=0,
+            #     )[0]
+            #     neg_noise_pred = neg_noise_pred[:, : latents.size(1) :]
+            #     noise_pred = neg_noise_pred + guidance_scale * (noise_pred - neg_noise_pred)
             # Apply projected-flow guidance (cosine_shift) using the upsampled LR guidance latents.
             if guidance_schedule != "disable":
                 # Flow projection velocity that moves current sample toward the guidance latent.
@@ -702,6 +745,7 @@ def generate(
         hr_mem_fh.close()
     inv_hr_permutation_idx = inverse_permutation(hr_permutation_idx)
     latents = latents[:, inv_hr_permutation_idx, ]
+    latent_image_ids = latent_image_ids[:, inv_hr_permutation_idx, ]
     self.vae.enable_tiling()
     self.vae.enable_slicing()
     # 8. Save high-res image
@@ -716,12 +760,15 @@ def generate(
                     self.vae2.to(device)
             except Exception:
                 pass
-        latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
-        latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
-        if model_config.get("finetuned_vae", False):
-            image = self.vae2.decode(latents.to(self.vae2.dtype), return_dict=False)[0]
-        else:
-            image = self.vae.decode(latents.to(self.vae.dtype), return_dict=False)[0]
+        # latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
+        latents = self._unpack_latents_with_ids(latents, latent_image_ids)
+        latents_bn_mean = self.vae.bn.running_mean.view(1, -1, 1, 1).to(latents.device, latents.dtype)
+        latents_bn_std = torch.sqrt(self.vae.bn.running_var.view(1, -1, 1, 1) + self.vae.config.batch_norm_eps).to(
+            latents.device, latents.dtype
+        )
+        latents = latents * latents_bn_std + latents_bn_mean
+        latents = self._unpatchify_latents(latents)
+        image = self.vae.decode(latents.to(self.vae.dtype), return_dict=False)[0]
         image = self.image_processor.postprocess(image, output_type=output_type)
     
     # Offload all models
@@ -738,6 +785,6 @@ def generate(
 
     # Ensure we're returning a consistent format
     if model_config.get("joint_denoise", False):
-        return FluxPipelineOutput(images=[image, lr_guidance_img_save])
+        return Flux2PipelineOutput(images=[image, lr_guidance_img_save])
     else:
-        return FluxPipelineOutput(images=image)
+        return Flux2PipelineOutput(images=image)
