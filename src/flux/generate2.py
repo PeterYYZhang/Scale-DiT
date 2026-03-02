@@ -719,7 +719,7 @@ def generate(
             #         low_res_timestep=0,
             #     )[0]
             #     neg_noise_pred = neg_noise_pred[:, : latents.size(1) :]
-            #     noise_pred = neg_noise_pred + guidance_scale * (noise_pred - neg_noise_pred)
+            #     noise_pred = neg_noise_pred + guidance_scale *  )
             # Apply projected-flow guidance (cosine_shift) using the upsampled LR guidance latents.
             if guidance_schedule != "disable":
                 # Flow projection velocity that moves current sample toward the guidance latent.

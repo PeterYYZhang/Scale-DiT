@@ -8,12 +8,6 @@ try:
 except:
     from lora_controller import enable_lora
 
-import math
-from diffusers.models.embeddings import apply_rotary_emb
-import random
-import logging
-import torch.nn as nn
-
 # Sage / Sparge blocksparse attention (CUDA)
 SAGE_CORE_AVAILABLE = False
 try:
