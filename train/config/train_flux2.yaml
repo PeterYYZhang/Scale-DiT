@@ -1,7 +1,7 @@
 flux_path: "black-forest-labs/FLUX.2-klein-base-9B"
 dtype: "bfloat16"
 #### New lora
-# lora_path: "/scratch/yuyao/Scale-DiT/runs/train20260226-021633/ckpt/16000/pytorch_lora_weights.safetensors"
+# lora_path: "/scratch/yuyao/Scale-DiT/runs/train20260228-182930/ckpt/2000/pytorch_lora_weights.safetensors"
 lora_path: null
 model:
   patch_size: 16
@@ -89,4 +89,4 @@ train:
     num_inference_steps: 28 #28
     lr_guidance_scale: 3.5 # 3.5
     hr_inference_steps: 28 #28
-    hr_guidance_scale: 5.5 #4.5
+    hr_guidance_scale: 0 #4.5

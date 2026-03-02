@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import os
 from typing import Optional, Dict, Any
 from .lora_controller import enable_lora
 from .pipeline_tools import FluxPosEmbedForward, Flux2PosEmbedForward
@@ -11,6 +12,70 @@ from diffusers.models.transformers.transformer_flux2 import (
     Flux2PosEmbed,
 )
 from diffusers.utils import (scale_lora_layers, unscale_lora_layers, logger, USE_PEFT_BACKEND)
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    v = str(v).strip().lower()
+    if v in ("1", "true", "t", "yes", "y", "on"):
+        return True
+    if v in ("0", "false", "f", "no", "n", "off"):
+        return False
+    return default
+
+
+def _is_8192x8192(model_config: Dict[str, Any]) -> bool:
+    cfg = model_config or {}
+    sz = cfg.get("image_size", None)
+    try:
+        h = int(sz[0])
+        w = int(sz[1])
+        return h == 8192 and w == 8192
+    except Exception:
+        return False
+
+
+def _should_cpu_offload_transformer_blocks(model_config: Dict[str, Any], compute_device: torch.device) -> bool:
+    """
+    Offload transformer blocks CPU<->GPU *during forward* to reduce peak VRAM.
+    Safe defaults:
+      - Only when computing on CUDA
+      - Only when grad is disabled (e.g. sampling / inference)
+      - Enabled by config flag or env var, with an optional "auto for huge images" heuristic
+    """
+    if compute_device is None or compute_device.type != "cuda":
+        return False
+    if torch.is_grad_enabled():
+        return False
+
+    cfg = model_config or {}
+    only_8192_gate = bool(cfg.get("cpu_offload_transformer_blocks_only_8192", True))
+    if only_8192_gate and not _is_8192x8192(cfg):
+        return False
+
+    if bool(cfg.get("cpu_offload_transformer_blocks", False)):
+        return True
+    if _env_flag("XFL_CPU_OFFLOAD_TRANSFORMER_BLOCKS", default=False):
+        return True
+
+    # Auto-enable for extremely large images unless explicitly disabled.
+    # This avoids editing YAML for the common "8192x8192 OOM during sampling" case.
+    auto = os.environ.get("XFL_CPU_OFFLOAD_TRANSFORMER_BLOCKS", "").strip().lower() == "auto"
+    if auto:
+        if _is_8192x8192(cfg):
+            return True
+
+    return False
+
+
+def _maybe_empty_cache(device: torch.device, every: int, step: int) -> None:
+    if device is None or device.type != "cuda":
+        return
+    if every <= 0:
+        return
+    if step % every == 0:
+        torch.cuda.empty_cache()
 
 
 def prepare_params(
@@ -94,11 +159,15 @@ def tranformer_forward(
     with enable_lora((self.x_embedder,), False):
     # with enable_only_lora((self.x_embedder,), "urae"):
         hidden_states = self.x_embedder(hidden_states)
-
     if low_res_guidance is not None:
         if low_res_guidance.ndim == 3:
             low_res_guidance = low_res_guidance[0]
         low_res_guidance = self.x_embedder(low_res_guidance)
+
+    compute_device = hidden_states.device
+    offload_blocks = _should_cpu_offload_transformer_blocks(model_config or {}, compute_device)
+    # How often to call empty_cache after offloading a block (trade speed vs fragmentation relief).
+    empty_cache_every = int((model_config or {}).get("cpu_offload_empty_cache_every", 4))
 
     timestep = timestep.to(hidden_states.dtype) * 1000
 
@@ -171,6 +240,8 @@ def tranformer_forward(
     
     # Double stream 
     for index_block, block in enumerate(self.transformer_blocks):
+        if offload_blocks:
+            block.to(compute_device)
         if self.training and self.gradient_checkpointing:
             use_sage = model_config.get("use_sage_blocksparse", False)
 
@@ -180,7 +251,8 @@ def tranformer_forward(
                 # Safety: some pipelines/configs may place single-stream blocks in `transformer_blocks`.
                 # Double-stream blocks have `norm1_context`; single-stream blocks only have `norm`.
                 if hasattr(block, "norm1_context"):
-                    forward_fn = block_forward if use_sage else block_forward_train
+                    # forward_fn = block_forward if use_sage else block_forward_train
+                    forward_fn = block_forward_train
                     return forward_fn(
                         block,
                         model_config=model_config,
@@ -195,7 +267,8 @@ def tranformer_forward(
                         double_stream_mod_lr=double_stream_mod_lr,
                     )
 
-                forward_fn = single_block_forward if use_sage else single_block_forward_train
+                # forward_fn = single_block_forward if use_sage else single_block_forward_train
+                forward_fn = single_block_forward_train
                 text_len = enc_h.shape[1]
                 h_cat = torch.cat([enc_h, h], dim=1)
                 h_cat, lr_g = forward_fn(
@@ -226,7 +299,8 @@ def tranformer_forward(
         else:
             use_sage = model_config.get("use_sage_blocksparse", False)
             if hasattr(block, "norm1_context"):
-                forward_fn = block_forward if use_sage else block_forward_train
+                # forward_fn = block_forward if use_sage else block_forward_train
+                forward_fn = block_forward_train
                 checkpoint_output = forward_fn(
                     block,
                     model_config=model_config,
@@ -245,7 +319,8 @@ def tranformer_forward(
                 else:
                     encoder_hidden_states, hidden_states, low_res_guidance = checkpoint_output
             else:
-                forward_fn = single_block_forward if use_sage else single_block_forward_train
+                # forward_fn = single_block_forward if use_sage else single_block_forward_train  
+                forward_fn = single_block_forward_train
                 text_len = encoder_hidden_states.shape[1]
                 h_cat = torch.cat([encoder_hidden_states, hidden_states], dim=1)
                 h_cat, low_res_guidance = forward_fn(
@@ -260,16 +335,22 @@ def tranformer_forward(
                     timestep=timestep,
                 )
                 encoder_hidden_states, hidden_states = h_cat[:, :text_len], h_cat[:, text_len:]
+        if offload_blocks:
+            block.to("cpu")
+            _maybe_empty_cache(compute_device, empty_cache_every, index_block + 1)
 
     hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
 
     for index_block, block in enumerate(self.single_transformer_blocks):
+        if offload_blocks:
+            block.to(compute_device)
         if self.training and self.gradient_checkpointing:
             use_sage = model_config.get("use_sage_blocksparse", False)
 
             # Same late-binding issue as above for backward recomputation.
             def _single_block_forward_ckpt(h, lr_g, block=block, index_block=index_block):
-                forward_fn = single_block_forward if use_sage else single_block_forward_train
+                # forward_fn = single_block_forward if use_sage else single_block_forward_train
+                forward_fn = single_block_forward_train
                 return forward_fn(
                     block,
                     model_config=model_config,
@@ -294,7 +375,8 @@ def tranformer_forward(
                 hidden_states, low_res_guidance = checkpoint_output
         else:
             if model_config.get("use_sage_blocksparse", False):
-                checkpoint_output = single_block_forward(
+                # checkpoint_output = single_block_forward if use_sage else single_block_forward_train
+                checkpoint_output = single_block_forward_train(
                     block,
                     model_config=model_config,
                     hidden_states=hidden_states,
@@ -321,6 +403,9 @@ def tranformer_forward(
                 hidden_states, _ = checkpoint_output
             else:
                 hidden_states, low_res_guidance = checkpoint_output
+        if offload_blocks:
+            block.to("cpu")
+            _maybe_empty_cache(compute_device, empty_cache_every, index_block + 1)
 
     hidden_states = hidden_states[:, encoder_hidden_states.shape[1] :, ...]
     hidden_states = self.norm_out(hidden_states, temb)
@@ -328,7 +413,6 @@ def tranformer_forward(
     if USE_PEFT_BACKEND:
         # remove `lora_scale` from each PEFT layer
         unscale_lora_layers(self, lora_scale)
-
     if not return_dict:
         return (output,)
     return Transformer2DModelOutput(sample=output)

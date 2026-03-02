@@ -48,7 +48,7 @@ class FluxHierarchicalModel(L.LightningModule):
         self.transformer = self.flux_pipe.transformer
         self.transformer.gradient_checkpointing = gradient_checkpointing
         self.transformer.train()
-        # self.flux_pipe.scheduler.config.use_dynamic_shifting = False
+        self.flux_pipe.scheduler.config.use_dynamic_shifting = False
         # self.flux_pipe.scheduler.config.time_shift = 10
         # Freeze the Flux pipeline
         self.flux_pipe.text_encoder.requires_grad_(False).eval()

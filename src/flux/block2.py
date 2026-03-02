@@ -370,9 +370,9 @@ def _attn_forward_impl(
 
     # =============================== Perform Parallel Attention ===============================
     if low_res_guidance is not None:
-        query = query#.transpose(1, 2)
-        key = key#.transpose(1, 2)
-        value = value#.transpose(1, 2)
+        query = query.transpose(1, 2)
+        key = key.transpose(1, 2)
+        value = value.transpose(1, 2)
 
         if SAGE_BLOCKSPARSE_AVAILABLE and model_config.get("use_sage_blocksparse", False):
             nheads = query.shape[1]
@@ -421,7 +421,7 @@ def _attn_forward_impl(
             hidden_states = out
         else:
             raise RuntimeError("Sage blocksparse attention is required but not available. Please enable use_sage_blocksparse in model_config.")
-        hidden_states = hidden_states#.transpose(1, 2)
+        hidden_states = hidden_states.transpose(1, 2)
     else:
         # Transpose to (B, H, N, D) format expected by dispatch_attention_fn
         query = query#.transpose(1, 2)
@@ -541,8 +541,7 @@ def single_attn_forward(
 
     if SAGE_BLOCKSPARSE_AVAILABLE and model_config.get("use_sage_blocksparse", False):
         nheads = query.shape[1]
-        head_dim = query.shape[3]
-        scale = 1.0 / math.sqrt(head_dim)
+
 
         img_h, img_w = model_config.get("image_size", (4096, 4096))
         cpu_mask_key = ("THL_128x64_mask", int(batch_size), int(nheads), int(img_h), int(img_w))
@@ -567,7 +566,7 @@ def single_attn_forward(
             query, key, value,
             mask_id=block_map,
             dropout_p=0.0,
-            scale=scale,
+            scale=None,
             smooth_k=bool(model_config.get("sage_smooth_k", True)),
             pvthreshd=int(model_config.get("sage_pvthreshd", 50)),
             attention_sink=bool(model_config.get("sage_attention_sink", False)),

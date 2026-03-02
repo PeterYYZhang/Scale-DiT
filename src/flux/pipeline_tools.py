@@ -2,8 +2,11 @@ import torch
 from torch import Tensor
 from diffusers.utils import logging
 from diffusers.pipelines import FluxPipeline
-from diffusers.pipelines.flux2.pipeline_flux2_klein import logger as logger2
-from diffusers.pipelines.flux2.pipeline_flux2_klein import Flux2KleinPipeline
+try:
+    from diffusers.pipelines.flux2.pipeline_flux2_klein import logger as logger2
+    from diffusers.pipelines.flux2.pipeline_flux2_klein import Flux2KleinPipeline
+except:
+    pass
 from torchvision.transforms import GaussianBlur
 from diffusers.pipelines.flux.pipeline_flux import logger
 from diffusers.models.embeddings import get_1d_rotary_pos_embed
@@ -57,7 +60,7 @@ def prepare_text_input(pipeline: FluxPipeline, prompts, max_sequence_length=512)
     return prompt_embeds, pooled_prompt_embeds, text_ids
 
 def prepare_text_input2(
-    pipeline: Flux2KleinPipeline,
+    pipeline,
     prompts,
     max_sequence_length=512,
     prompt_embeds=None,
@@ -78,9 +81,11 @@ def prepare_text_input2(
     )
     logger2.setLevel(logging.WARNING)
     return prompt_embeds, text_ids
-
-from diffusers.pipelines.flux2.pipeline_flux2_klein import retrieve_latents
-def encode_images_tiled2(pipeline: Flux2KleinPipeline, image: Tensor):
+try:
+    from diffusers.pipelines.flux2.pipeline_flux2_klein import retrieve_latents
+except:
+    pass
+def encode_images_tiled2(pipeline, image: Tensor):
     """
     Encode a batch of images to FLUX2 latent tokens + ids.
 

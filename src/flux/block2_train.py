@@ -21,6 +21,113 @@ import logging
 import torch.nn as nn
 
 
+# Sage / Sparge blocksparse attention (CUDA)
+SAGE_CORE_AVAILABLE = False
+try:
+    from spas_sage_attn import block_sparse_sage2_attn_cuda  # type: ignore
+    SAGE_CORE_AVAILABLE = True
+except Exception:
+    SAGE_CORE_AVAILABLE = False
+
+SAGE_BLOCKSPARSE_AVAILABLE = SAGE_CORE_AVAILABLE
+
+
+def _call_sage_blocksparse(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    block_map: Optional[torch.Tensor],
+    model_config: Dict[str, Any],
+) -> torch.Tensor:
+    if not SAGE_CORE_AVAILABLE:
+        raise RuntimeError("Sage blocksparse attention is not available")
+    return block_sparse_sage2_attn_cuda(
+        query,
+        key,
+        value,
+        mask_id=block_map,
+        dropout_p=0.0,
+        scale=query.shape[-1] ** -0.5,
+        smooth_k=bool(model_config.get("sage_smooth_k", True)),
+        pvthreshd=int(model_config.get("sage_pvthreshd", 50)),
+        attention_sink=bool(model_config.get("sage_attention_sink", False)),
+        tensor_layout="HND",
+        output_dtype=query.dtype,
+        return_sparsity=False,
+    )
+
+
+# Cache Sage masks loaded from disk (CPU) by shape
+_SAGE_BLOCK_MASK_CACHE: Dict[Tuple, torch.Tensor] = {}
+
+
+def _load_sage_mask_thl_128x64(
+    model_config: Dict[str, Any],
+    *,
+    batch_size: int,
+    heads: int,
+) -> torch.Tensor:
+    """
+    Load a precomputed THL mask on Sage's asymmetric grid:
+      - Q-block = 128 tokens
+      - K-block = 64 tokens
+
+    Returns a CPU tensor (typically bool) that will be moved/cast on demand.
+    """
+    # Defaults (keep aligned with block2.py)
+    model_config.setdefault("use_sage_blocksparse", True)
+    model_config.setdefault("sage_kernel_blk_q", 128)
+    model_config.setdefault("sage_kernel_blk_k", 64)
+    model_config.setdefault("sage_smooth_k", True)
+    model_config.setdefault("sage_pvthreshd", 50)
+    model_config.setdefault("sage_attention_sink", False)
+
+    img_h, img_w = model_config.get("image_size", (4096, 4096))
+    cache_key = ("SAGE_THL_128x64_mask", int(batch_size), int(heads), int(img_h), int(img_w))
+    cached = _SAGE_BLOCK_MASK_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Precomputed mask file paths keyed by image size (H, W)
+    base_dir = "/scratch/yuyao/Scale-DiT/src/flux/attn_masks"
+    size_to_path = {
+        (6144, 6144): f"{base_dir}/(6144, 6144)x(6144, 6144)_downsampled_128_test-window.pt",
+        (4096, 4096): f"{base_dir}/(4096, 4096)x(4096, 4096)_downsampled_128_test-window.pt",
+        (2048, 6144): f"{base_dir}/(2048, 6144)x(2048, 6144)_downsampled_128_test-window.pt",
+        (1024, 1024): f"{base_dir}/(1024, 1024)x(1024, 1024)_downsampled_128_test-window.pt",
+        (2048, 2048): f"{base_dir}/(2048, 2048)x(2048, 2048)_downsampled_128_test-window.pt",
+        (3072, 3072): f"{base_dir}/(3072, 3072)x(3072, 3072)_downsampled_128_test-window.pt",
+        (8192, 8192): f"{base_dir}/(8192, 8192)x(8192, 8192)_downsampled_128_test-window.pt",
+        (4096, 8192): f"{base_dir}/(4096, 8192)x(4096, 8192)_downsampled_128_test-window.pt",
+        (6144, 4096): f"{base_dir}/(6144, 4096)x(6144, 4096)_downsampled_128_test-window.pt",
+        (4096, 3072): f"{base_dir}/(4096, 3072)x(4096, 3072)_downsampled_128_test-window.pt",
+        (8192, 6144): f"{base_dir}/(8192, 6144)x(8192, 6144)_downsampled_128_test-window.pt",
+        (4096, 2048): f"{base_dir}/(4096, 2048)x(4096, 2048)_downsampled_128_test-window.pt",
+        (8192, 4096): f"{base_dir}/(8192, 4096)x(8192, 4096)_downsampled_128_test-window.pt",
+    }
+    mask_path = size_to_path.get((int(img_h), int(img_w)))
+    if mask_path is None:
+        raise ValueError(f"Image size {img_h} not supported, please build the mask first.")
+    if not os.path.exists(mask_path):
+        raise FileNotFoundError(f"Block mask file does not exist: {mask_path}")
+
+    block_mask = torch.load(mask_path, map_location="cpu")
+    if isinstance(block_mask, torch.Tensor):
+        block_mask = block_mask.to(torch.bool)
+
+    # Expand to (B, H, Qb, Kb) if needed
+    if block_mask.dim() == 2:
+        block_mask = block_mask.unsqueeze(0).unsqueeze(0).expand(batch_size, heads, -1, -1)
+    elif block_mask.dim() == 3:
+        block_mask = block_mask.unsqueeze(0).expand(batch_size, -1, -1, -1)
+    elif block_mask.dim() == 4:
+        if block_mask.shape[0] != batch_size or block_mask.shape[1] != heads:
+            block_mask = block_mask.expand(batch_size, heads, -1, -1)
+
+    _SAGE_BLOCK_MASK_CACHE[cache_key] = block_mask
+    return block_mask
+
+
 # Optional: Check for Flash Attention support
 FLASH_ATTENTION_AVAILABLE = hasattr(F, 'scaled_dot_product_attention')
 
@@ -549,11 +656,14 @@ def _attn_forward_impl(
         value = torch.cat([value, low_res_guidance_value], dim=1)
 
     # =============================== Build Unified KV and Mask ===============================
-    # If we're using block-sparse attention, DO NOT build the dense boolean mask to save memory.
+    # If we're using block-sparse kernels, DO NOT build the dense boolean mask to save memory.
     use_blocksparse = (
         BLOCK_SPARSE_ATTENTION_AVAILABLE and model_config.get("use_block_sparse_attention", False)
     )
-    if low_res_guidance is not None and not use_blocksparse:
+    use_sage = (
+        SAGE_BLOCKSPARSE_AVAILABLE and model_config.get("use_sage_blocksparse", False)
+    )
+    if low_res_guidance is not None and (not use_blocksparse) and (not use_sage):
         # Optionally load a precomputed dense mask for speed (must match current token lengths).
         # NOTE: previously this was hardcoded to a user-specific path, which breaks portability.
         precomputed_path = model_config.get("precomputed_attn_mask_path", "/scratch/yuyao/Scale-DiT/src/flux/attn_masks/mask_expanded_128x64_test-new.pt")
@@ -564,12 +674,6 @@ def _attn_forward_impl(
             attn_mask = _PRECOMPUTED_DENSE_MASK
         else:
             attn_mask = _build_mask(
-                model_config=model_config,
-                device=query.device,
-                dtype=query.dtype,
-                block_idx=block_idx,
-            )
-        attn_mask = _build_mask(
                 model_config=model_config,
                 device=query.device,
                 dtype=query.dtype,
@@ -589,12 +693,39 @@ def _attn_forward_impl(
         query = query.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
-        if FLASH_ATTENTION_AVAILABLE and model_config.get("use_flash_attention", True):
-            # if full_attn:
-                # model_config["interpolation_init"] = False
-                # attn_mask = None
-                # model_config["lr_guidance_weight"] = 0
-                # model_config["ntk_factor"] = 1.0  
+        if use_sage:
+            nheads = query.shape[1]
+            cpu_mask_key = (
+                "SAGE_THL_128x64_mask",
+                int(batch_size),
+                int(nheads),
+                int(model_config.get("image_size", (4096, 4096))[0]),
+                int(model_config.get("image_size", (4096, 4096))[1]),
+            )
+            gpu_mask_key = (cpu_mask_key, str(query.device))
+            cached_gpu = _SAGE_BLOCK_MASK_CACHE.get(gpu_mask_key)  # type: ignore[arg-type]
+            if cached_gpu is not None:
+                block_map = cached_gpu
+            else:
+                block_map_cpu = _SAGE_BLOCK_MASK_CACHE.get(cpu_mask_key)  # type: ignore[arg-type]
+                if block_map_cpu is None:
+                    block_map_cpu = _load_sage_mask_thl_128x64(
+                        model_config,
+                        batch_size=int(batch_size),
+                        heads=int(nheads),
+                    )
+                    _SAGE_BLOCK_MASK_CACHE[cpu_mask_key] = block_map_cpu
+                block_map = (
+                    block_map_cpu.to(device=query.device, dtype=torch.uint8, non_blocking=True)
+                    .contiguous()
+                )
+                _SAGE_BLOCK_MASK_CACHE[gpu_mask_key] = block_map
+
+            query = query.contiguous()
+            key = key.contiguous()
+            value = value.contiguous()
+            hidden_states = _call_sage_blocksparse(query, key, value, block_map, model_config)
+        elif FLASH_ATTENTION_AVAILABLE and model_config.get("use_flash_attention", False):
             if model_config.get("proportional_attn", False):
                 l1 = model_config.get("window_size", [256, 256])[0]*model_config.get("window_size", [256, 256])[1]//16//16 + model_config.get("text_seq_len", 512) +model_config.get("joint_denoise_size", [640, 640])[0]*model_config.get("joint_denoise_size", [640, 640])[1]//16//16 
                 l2 = 4096 + 512
@@ -608,83 +739,6 @@ def _attn_forward_impl(
                 dropout_p=0.0,
                 scale=attn.scale if model_config.get("proportional_attn", False) else None,
             )
-        elif BLOCK_SPARSE_ATTENTION_AVAILABLE and model_config.get("use_block_sparse_attention", False):
-            # Use block-sparse kernel with THL mask
-            batch = query.shape[0]
-            seqlen = query.shape[2]
-            nheads = query.shape[1]
-            headdim = query.shape[-1]
-
-            image_size = model_config.get("image_size", (8192, 4096))
-            patch_size = model_config.get("patch_size", 16)
-            joint_denoise = model_config.get("joint_denoise_size", (256, 256))
-
-            H_p = image_size[0] // patch_size
-            W_p = image_size[1] // patch_size
-            hi_res_len = H_p * W_p
-            low_res_len = (joint_denoise[0] // patch_size) * (joint_denoise[1] // patch_size)
-
-            # Enhanced mask cache key including all relevant parameters
-            window_size = model_config.get("window_size", (256, 256))
-            patch_size = model_config.get("patch_size", 16)
-            window_patches_H = window_size[0] // patch_size
-            window_patches_W = window_size[1] // patch_size
-            
-            cache_key = (
-                "THL-Enhanced",
-                float(model_config.get("bs_diag_overlap", 0.5)),
-                int(model_config.get("bs_diag_block_tokens", model_config.get("window_size", (256, 256))[0])),
-                int(model_config.get("text_attend_scale", "limited") == "all"),
-                int(model_config.get("hi_res_attend_scale", "all") == "all"),
-                window_patches_H,
-                window_patches_W,
-                batch, nheads, seqlen, text_seq_len, hi_res_len, low_res_len,
-            )
-            cached = _BLOCK_MASK_CACHE.get(cache_key)
-            if cached is not None and cached[0].device == query.device:
-                base_blockmask, head_mask_type = cached
-            else:
-                base_blockmask, head_mask_type, _, _ = _build_blocksparse_mask_thl(
-                    model_config,
-                    batch_size=batch_size,
-                    device=query.device,
-                    heads=nheads,
-                    text_seq_len=text_seq_len,
-                    hi_res_len=hi_res_len,
-                    low_res_len=low_res_len,
-                )
-                _BLOCK_MASK_CACHE[cache_key] = (base_blockmask, head_mask_type)
-            
-
-            # Flatten to varlen representation (no padding within batch)
-            q_total = query.permute(0, 2, 1, 3).reshape(batch * seqlen, nheads, headdim).contiguous()
-            k_total = key.permute(0, 2, 1, 3).reshape(batch * seqlen, nheads, headdim).contiguous()
-            v_total = value.permute(0, 2, 1, 3).reshape(batch * seqlen, nheads, headdim).contiguous()
-
-            cu = torch.arange(0, (batch + 1) * seqlen, step=seqlen, dtype=torch.int32, device=query.device)
-            # Kernel expects (num_heads * 2) even if streaming isn't used (we set zeros)
-            streaming_info = torch.zeros(nheads * 2, dtype=torch.int32, device=query.device)
-
-            out = block_sparse_attn_func(
-                q_total,
-                k_total,
-                v_total,
-                cu,
-                cu,
-                head_mask_type,
-                streaming_info,
-                base_blockmask,
-                seqlen,
-                seqlen,
-                0.0,
-                deterministic=False,
-                softmax_scale=attn.scale,
-                is_causal=False,
-                exact_streaming=False,
-                return_attn_probs=False,
-            )
-
-            hidden_states = out.view(batch, seqlen, nheads, headdim).permute(0, 2, 1, 3).contiguous()
         # Option 2: Standard attention (fallback)
         else:
             scores = torch.matmul(query, key.transpose(-2, -1)) * attn.scale
@@ -801,19 +855,25 @@ def single_attn_forward(
     key = torch.cat([key, lr_key], dim=1)
     value = torch.cat([value, lr_value], dim=1)
 
-    precomputed_path = model_config.get("precomputed_attn_mask_path", None)
-    global _PRECOMPUTED_DENSE_MASK
-    if precomputed_path is not None and os.path.exists(precomputed_path):
-        if _PRECOMPUTED_DENSE_MASK is None:
-            _PRECOMPUTED_DENSE_MASK = torch.load(precomputed_path, map_location="cpu")
-        attn_mask = _PRECOMPUTED_DENSE_MASK
+    use_sage = (
+        SAGE_BLOCKSPARSE_AVAILABLE and model_config.get("use_sage_blocksparse", False)
+    )
+    if not use_sage:
+        precomputed_path = model_config.get("precomputed_attn_mask_path", None)
+        global _PRECOMPUTED_DENSE_MASK
+        if precomputed_path is not None and os.path.exists(precomputed_path):
+            if _PRECOMPUTED_DENSE_MASK is None:
+                _PRECOMPUTED_DENSE_MASK = torch.load(precomputed_path, map_location="cpu")
+            attn_mask = _PRECOMPUTED_DENSE_MASK
+        else:
+            attn_mask = _build_mask(
+                model_config=model_config,
+                device=query.device,
+                dtype=query.dtype,
+                block_idx=block_idx,
+            )
     else:
-        attn_mask = _build_mask(
-            model_config=model_config,
-            device=query.device,
-            dtype=query.dtype,
-            block_idx=block_idx,
-        )
+        attn_mask = None
 
     if image_rotary_emb is not None:
         query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
@@ -823,9 +883,43 @@ def single_attn_forward(
     key = key.transpose(1, 2)
     value = value.transpose(1, 2)
 
-    if FLASH_ATTENTION_AVAILABLE and model_config.get("use_flash_attention", True):
+    if use_sage:
+        batch_size = hidden_states.shape[0]
+        nheads = query.shape[1]
+        cpu_mask_key = (
+            "SAGE_THL_128x64_mask",
+            int(batch_size),
+            int(nheads),
+            int(model_config.get("image_size", (4096, 4096))[0]),
+            int(model_config.get("image_size", (4096, 4096))[1]),
+        )
+        gpu_mask_key = (cpu_mask_key, str(query.device))
+        cached_gpu = _SAGE_BLOCK_MASK_CACHE.get(gpu_mask_key)  # type: ignore[arg-type]
+        if cached_gpu is not None:
+            block_map = cached_gpu
+        else:
+            block_map_cpu = _SAGE_BLOCK_MASK_CACHE.get(cpu_mask_key)  # type: ignore[arg-type]
+            if block_map_cpu is None:
+                block_map_cpu = _load_sage_mask_thl_128x64(
+                    model_config,
+                    batch_size=int(batch_size),
+                    heads=int(nheads),
+                )
+                _SAGE_BLOCK_MASK_CACHE[cpu_mask_key] = block_map_cpu
+            block_map = (
+                block_map_cpu.to(device=query.device, dtype=torch.uint8, non_blocking=True)
+                .contiguous()
+            )
+            _SAGE_BLOCK_MASK_CACHE[gpu_mask_key] = block_map
+        query = query.contiguous()
+        key = key.contiguous()
+        value = value.contiguous()
+        attn_output = _call_sage_blocksparse(query, key, value, block_map, model_config)
+    elif FLASH_ATTENTION_AVAILABLE and model_config.get("use_flash_attention", True):
         attn_output = F.scaled_dot_product_attention(
-            query, key, value,
+            query,
+            key,
+            value,
             attn_mask=_normalize_attn_mask_for_scores(attn_mask, query.shape[2], key.shape[2], query.device),
             dropout_p=0.0,
         )

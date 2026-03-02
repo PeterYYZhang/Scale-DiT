@@ -1,12 +1,12 @@
-flux_path: "black-forest-labs/FLUX.1-dev"
+flux_path: "black-forest-labs/FLUX.2-klein-9B"
 dtype: "bfloat16"
 #### New lora
 # lora_path: "checkpoints/full_lora/pytorch_lora_weights.safetensors" # you can put your own lora path here
-lora_path: "/scratch/yuyao/HiHi_T2I/zruns/train_coarse20251123-224743/ckpt/8000/pytorch_lora_weights.safetensors"
-# lora_path: "/scratch/yuyao/Scale-DiT/runs/train20260208-195815/ckpt/37000/pytorch_lora_weights.safetensors" #4K fine-tuned lora
+lora_path: "/scratch/yuyao/Scale-DiT/runs/train20260228-224649/ckpt/16000/pytorch_lora_weights.safetensors"
+# lora_path: "/scratch/yuyao/Scale-DiT/runs/train20260227-154046/ckpt/7000/pytorch_lora_weights.safetensors" 
 # lora_path: null
 model:
-  seed: 42
+  seed: 0
   patch_size: 16
   image_size: [4096, 4096]
   joint_denoise_size: [1024, 1024]  
@@ -22,15 +22,15 @@ model:
   # - do not update LR tokens inside transformer blocks
   # - allows caching LR branch Q/K/V projections per attention layer across denoising steps
   low_res_guidance_as_condition: false
-  cache_low_res_guidance_qkv: true
+  cache_low_res_guidance_qkv: false
   scale_PE: true
   interpolation_init: true
   # Attention masking parameters
   text_attend_scale: "limited"  # Controls how text tokens attend to other tokens ("all" or "limited")
   hi_res_attend_scale: "all"  # Controls how high-res image tokens attend to low-res tokens ("all" or "limited")
   # Position embedding parameters
-  ntk_factor: 10.0
-  theta: 10000.0
+  ntk_factor: 1.0
+  theta: 2000.0
   freq_filtering: false
   use_sliding_window: true
   # Block-Sparse Attention parameters
@@ -47,12 +47,12 @@ model:
   # finetuned vae
   finetuned_vae: false
   finetuned_vae_path: null
-  guidance_schedule: "cosine_decay" # "cosine_hp_decay" "cosine_decay" "cosine_shift" "constant" "costant_hp" "disable"
-  # guidance_schedule: "disable"
+  # guidance_schedule: "cosine_decay" # "cosine_hp_decay" "cosine_decay" "cosine_shift" "constant" "costant_hp" "disable"
+  guidance_schedule: "disable"
   dwt_level: 1
   dwt_wavelet: "haar"
   print_gflops: true
-
+  cpu_offload_transformer_blocks_only_8192: true
 
 train:
   run_name: "infer-sage"
@@ -64,13 +64,13 @@ train:
   max_steps: -1
   max_epochs: -1  # Maximum number of epochs (-1 for unlimited)
   gradient_checkpointing: true
-  save_path: "run-resubmission"
+  save_path: "zrun"
   gradient_clip_val: 0.1
   print_every_n_steps: 10  
 
   dataset:
     name: "1kimages"
-    target_size: 4096 
+    target_size: 4096
     image_height: 4096
     image_width: 4096
     drop_text_prob: 0.1
@@ -98,6 +98,6 @@ train:
 
   generation:
     num_inference_steps: 28 #28
-    lr_guidance_scale: 3.5 # 3.5
-    hr_inference_steps: 18 #28
+    lr_guidance_scale: 4 # 3.5
+    hr_inference_steps: 28 #28
     hr_guidance_scale: 4.5 #4.5

@@ -117,10 +117,10 @@ class TrainingCallback(L.Callback):
                      ]
         # Read test prompts from file
         if pl_module.model_config.get("train", False):     
-            testlist_path = "/scratch/yuyao/Scale-DiT/train/config/prompt.txt" # you can put your own test prompts here (txt file)
+            testlist_path = "/scratch/yuyao/Scale-DiT/prompt_new.txt" # you can put your own test prompts here (txt file)
             testlist_path = ""
         else:
-            testlist_path = "/scratch/yuyao/Scale-DiT/train/config/prompt.txt"
+            testlist_path = "/scratch/yuyao/Scale-DiT/prompt_new.txt"
             testlist_path = ""
         try:
             with open(testlist_path, 'r', encoding='utf-8') as f:

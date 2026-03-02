@@ -12,7 +12,7 @@ from .pipeline_tools import (
     save_image,
     window_permutation,
     inverse_permutation,
-    encode_images_tiled,
+    encode_images_tiled2,
 )
 
 from diffusers.pipelines.flux2.pipeline_flux2_klein import (
@@ -21,6 +21,47 @@ from diffusers.pipelines.flux2.pipeline_flux2_klein import (
     retrieve_timesteps,
     np,
 )
+
+def _env_flag(name: str, default: Optional[bool] = None) -> Optional[bool]:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    v = str(v).strip().lower()
+    if v in ("1", "true", "t", "yes", "y", "on"):
+        return True
+    if v in ("0", "false", "f", "no", "n", "off"):
+        return False
+    if v == "auto":
+        return None
+    return default
+
+
+def _move_transformer_blocks_to_device(transformer, device: torch.device) -> None:
+    """
+    Ensure all transformer blocks are resident on `device`.
+    Needed if we used sequential CPU offload during sampling but will resume training.
+    """
+    for name in ("transformer_blocks", "single_transformer_blocks"):
+        blocks = getattr(transformer, name, None)
+        if blocks is None:
+            continue
+        for b in blocks:
+            try:
+                b.to(device)
+            except Exception:
+                pass
+
+
+def _is_8192x8192(model_config: Dict[str, Any]) -> bool:
+    cfg = model_config or {}
+    sz = cfg.get("image_size", None)
+    try:
+        h = int(sz[0])
+        w = int(sz[1])
+        return h == 8192 and w == 8192
+    except Exception:
+        return False
+
 
 def split_frequency_components_dwt(x, wavelet='haar', level=1):
     device = x.device
@@ -230,6 +271,25 @@ def generate(
 
     device = self._execution_device
 
+    # Enable sequential CPU offload of transformer blocks during no_grad sampling.
+    # Priority:
+    #   - explicit `model_config["cpu_offload_transformer_blocks"]`
+    #   - env `XFL_CPU_OFFLOAD_TRANSFORMER_BLOCKS` ("1"/"0"/"auto")
+    #   - auto for very large images on CUDA
+    env_offload = _env_flag("XFL_CPU_OFFLOAD_TRANSFORMER_BLOCKS", default=None)
+    if "cpu_offload_transformer_blocks" not in model_config and env_offload is not None:
+        model_config["cpu_offload_transformer_blocks"] = bool(env_offload)
+    if "cpu_offload_transformer_blocks" not in model_config:
+        # Auto: only for CUDA, only for 8192x8192 (avoid slowing down smaller resolutions).
+        model_config["cpu_offload_transformer_blocks"] = bool(device.type == "cuda" and _is_8192x8192(model_config))
+
+    # Gate: by default, only allow this offload path for exactly 8192x8192.
+    # You can override by setting `cpu_offload_transformer_blocks_only_8192: false`.
+    if bool(model_config.get("cpu_offload_transformer_blocks_only_8192", True)) and not _is_8192x8192(model_config):
+        model_config["cpu_offload_transformer_blocks"] = False
+    # A moderate default; can override via YAML or env by setting this key in model_config.
+    model_config.setdefault("cpu_offload_empty_cache_every", int(os.environ.get("XFL_CPU_OFFLOAD_EMPTY_CACHE_EVERY", "4")))
+
     # Ensure text encoder is on the correct device before encoding
     if hasattr(self, "text_encoder") and self.text_encoder is not None:
         self.text_encoder.to(device)
@@ -283,6 +343,8 @@ def generate(
         self.text_encoder.to("cpu")
     if hasattr(self, "text_encoder_2") and self.text_encoder_2 is not None:
         self.text_encoder_2.to("cpu")
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
 
     # 4. Prepare latent variables
     num_channels_latents = self.transformer.config.in_channels // 4
@@ -383,23 +445,18 @@ def generate(
                 progress_bar.update()
 
     # load the low-res image using center crop
-    # low_res_path = "/scratch/yuyao/Scale-DiT/flux_linear_3.png"
+    # low_res_path = "/scratch/yuyao/Scale-DiT/c27a51768b26f8a2baafc8d785fad46f 2.jpg"
     low_res_path = None
     if low_res_path is not None: #TODO: need to fix I hate new diffusers version
         joint_size = model_config.get("joint_denoise_size", [256, 256])
         image = Image.open(low_res_path).convert("RGB")
+        image = image.resize((joint_size[1], joint_size[0]), resample=Image.BICUBIC)
+        image = self.image_processor.preprocess(image)
+        image = image.to(device=self.device, dtype=self.dtype)
 
-        # Pad image to 512x512 instead of center crop
-        target_size = 512
-        width, height = image.size
-        target_w, target_h = height, height
-        left = (width - target_w) / 2
-        top = (height - target_h) / 2
-        right = (width + target_w) / 2
-        bottom = (height + target_h) / 2
-        image = image.crop((left, top, right, bottom)).resize((joint_size[0], joint_size[1]), resample=Image.BICUBIC)
-
-        latents, = encode_images_tiled(self, image)
+        latents, latent_image_ids = encode_images_tiled2(self, image)
+        latents = latents.to(device)
+        latent_image_ids = latent_image_ids.to(device)
 
     # Save low-res image
     # Keep LR tokens for joint denoise guidance (no need to clone; we rebind `latents` later).
@@ -779,6 +836,11 @@ def generate(
         self.text_encoder.to(device)
     if hasattr(self, 'text_encoder_2') and self.text_encoder_2 is not None:
         self.text_encoder_2.to(device)
+
+    # If we used sequential CPU offload during sampling inside a training run, restore blocks to GPU
+    # so the next training forward doesn't hit device-mismatch errors.
+    if bool(model_config.get("cpu_offload_transformer_blocks", False)) and getattr(self.transformer, "training", False):
+        _move_transformer_blocks_to_device(self.transformer, device)
 
     if not return_dict:
         return (image, lr_guidance_img_save) if model_config.get("joint_denoise", False) else (image, )
