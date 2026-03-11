@@ -9,4 +9,4 @@ echo $XFL_CONFIG
 
 export TOKENIZERS_PARALLELISM=true
 
-CUDA_VISIBLE_DEVICES=2 accelerate launch --num_processes 1 --main_process_port $(( ( RANDOM % 10000 )  + 50000 )) -m src.train.train2 --disable_wandb
+accelerate launch --num_processes 1 --main_process_port $(( ( RANDOM % 10000 )  + 50000 )) -m src.train.train2 --disable_wandb

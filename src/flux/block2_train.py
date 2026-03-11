@@ -104,6 +104,8 @@ def _load_sage_mask_thl_128x64(
         (8192, 6144): f"{base_dir}/(8192, 6144)x(8192, 6144)_downsampled_128_test-window.pt",
         (4096, 2048): f"{base_dir}/(4096, 2048)x(4096, 2048)_downsampled_128_test-window.pt",
         (8192, 4096): f"{base_dir}/(8192, 4096)x(8192, 4096)_downsampled_128_test-window.pt",
+        (4096, 10240): f"{base_dir}/(4096, 10240)x(4096, 10240)_downsampled_128_test-window.pt",
+        (8192, 16384): f"{base_dir}/(8192, 16384)x(8192, 16384)_downsampled_128_test-window.pt",
     }
     mask_path = size_to_path.get((int(img_h), int(img_w)))
     if mask_path is None:
@@ -340,9 +342,22 @@ def _build_mask(
         if shift_size_H > 0 or shift_size_W > 0:
             dh = torch.abs(window_h_ids.unsqueeze(1) - window_h_ids.unsqueeze(0))
             dw = torch.abs(window_w_ids.unsqueeze(1) - window_w_ids.unsqueeze(0))
-            window_mask = (dh + dw) <= 1  # same window or 4-neighbors
+            window_mask = (dh + dw) < 1  # same window or 4-neighbors
         else:
             window_mask = same_window_mask
+        if model_config.get("permute_window_first", False):
+            # Compute window-first permutation (group by window, then raster-scan within each window)
+            window_h_ids = h_indices // window_patches_H
+            window_w_ids = w_indices // window_patches_W
+            window_ids = window_h_ids * w_windows + window_w_ids
+            within_h = h_indices % window_patches_H
+            within_w = w_indices % window_patches_W
+            within_idx = within_h * window_patches_W + within_w
+            order_key = window_ids * (window_patches_H * window_patches_W) + within_idx
+            perm = torch.argsort(order_key)
+            window_mask = window_mask.index_select(0, perm).index_select(1, perm)
+        else:
+            window_mask = window_mask
 
         # Assign the window mask to the appropriate section of the attention mask
         attention_mask[hi_res_start:hi_res_end, hi_res_start:hi_res_end] = window_mask
@@ -409,6 +424,7 @@ def _build_mask(
     # attention_mask[-low_res_len:, -low_res_len:] = True
     # Convert boolean mask to float mask for attention
     # final_mask = torch.where(attention_mask, 0.0, -torch.inf).to(dtype)
+    
     final_mask = attention_mask
     
     return final_mask
@@ -672,6 +688,7 @@ def _attn_forward_impl(
             if _PRECOMPUTED_DENSE_MASK is None:
                 _PRECOMPUTED_DENSE_MASK = torch.load(precomputed_path, map_location="cpu")
             attn_mask = _PRECOMPUTED_DENSE_MASK
+            # print(f"Loaded precomputed dense mask from {precomputed_path}")
         else:
             attn_mask = _build_mask(
                 model_config=model_config,

@@ -121,7 +121,7 @@ class TrainingCallback(L.Callback):
             testlist_path = ""
         else:
             testlist_path = "/scratch/yuyao/Scale-DiT/prompt_new.txt"
-            testlist_path = ""
+            # testlist_path = ""
         try:
             with open(testlist_path, 'r', encoding='utf-8') as f:
                 test_list = [line.strip() for line in f if line.strip()]

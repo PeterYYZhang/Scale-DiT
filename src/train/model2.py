@@ -43,13 +43,13 @@ class FluxHierarchicalModel(L.LightningModule):
         print(f"Loading Flux pipeline with max RAM: {max_memory_gb}GB, CPU offload: {cpu_offload}")
         self.flux_pipe: Flux2KleinPipeline = self._load_flux_pipeline_memory_efficient(
             flux_pipe_id, device, dtype, low_cpu_mem_usage
-        )
+        ) if not self.model_config.get("remote_text_encoder", False) else self._load_flux_pipeline_fallback(flux_pipe_id, device, dtype, text_encoder=False)
         self.text_encoder = self.flux_pipe.text_encoder
         self.transformer = self.flux_pipe.transformer
         self.transformer.gradient_checkpointing = gradient_checkpointing
         self.transformer.train()
         self.flux_pipe.scheduler.config.use_dynamic_shifting = False
-        # self.flux_pipe.scheduler.config.time_shift = 10
+        self.flux_pipe.scheduler.config.time_shift = 10
         # Freeze the Flux pipeline
         self.flux_pipe.text_encoder.requires_grad_(False).eval()
         self.flux_pipe.vae.requires_grad_(False).eval()
@@ -59,6 +59,9 @@ class FluxHierarchicalModel(L.LightningModule):
         self.flux_pipe.scheduler.config.max_image_seq_len = 65536*4
         
         self.to(device=device, dtype=dtype)
+
+        if self.model_config.get("remote_text_encoder", False):
+            self.text_encoder = None
 
     def _materialize_meta_module_(self, module: nn.Module, device: str = "cpu") -> int:
         """
@@ -184,7 +187,7 @@ class FluxHierarchicalModel(L.LightningModule):
             # Fallback to sequential loading
             return self._load_flux_pipeline_fallback(flux_pipe_id, device, dtype)
     
-    def _load_flux_pipeline_fallback(self, flux_pipe_id: str, device: str, dtype: torch.dtype):
+    def _load_flux_pipeline_fallback(self, flux_pipe_id: str, device: str, dtype: torch.dtype, text_encoder: bool = True):
         """Fallback loading method with aggressive memory management"""
         print("Using fallback loading method with aggressive memory management")
         
@@ -194,11 +197,19 @@ class FluxHierarchicalModel(L.LightningModule):
             torch.cuda.empty_cache()
         
         # Load with minimal memory footprint
-        flux_pipe = Flux2KleinPipeline.from_pretrained(
-            flux_pipe_id,
-            dtype=dtype,
-            low_cpu_mem_usage=True, # Load to CPU first
-        )
+        if not text_encoder:
+            flux_pipe = Flux2KleinPipeline.from_pretrained(
+                flux_pipe_id,
+                dtype=dtype,
+                low_cpu_mem_usage=True, # Load to CPU first
+                text_encoder=None,
+            )
+        else:
+            flux_pipe = Flux2KleinPipeline.from_pretrained(
+                flux_pipe_id,
+                dtype=dtype,
+                low_cpu_mem_usage=True,
+            )
 
         materialized = self._materialize_meta_pipeline_(flux_pipe, device="cpu")
         if materialized > 0:
@@ -378,8 +389,27 @@ class FluxHierarchicalModel(L.LightningModule):
                 img_ids_lowres = img_ids_lowres[:, lr_permutation_idx,]
             
             # Prepare text input
+            if self.model_config.get("remote_text_encoder", False):
+                import requests
+                from huggingface_hub import get_token
+                import io
+                def remote_text_encoder(prompts):
+                    response = requests.post(
+                        "https://remote-text-encoder-flux-2.huggingface.co/predict",
+                        json={"prompt": prompts},
+                        headers={
+                            "Authorization": f"Bearer {get_token()}",
+                            "Content-Type": "application/json"
+                        }
+                    )
+                    prompt_embeds = torch.load(io.BytesIO(response.content))
+
+                    return prompt_embeds.to(self.device)
+
+
             prompt_embeds, text_ids = self.flux_pipe.encode_prompt(
-                prompt=prompts,
+                prompt=prompts if not self.model_config.get("remote_text_encoder", False) else None,
+                prompt_embeds=remote_text_encoder(prompts) if self.model_config.get("remote_text_encoder", False) else None,
                 device=self.device,
                 num_images_per_prompt=1,
                 max_sequence_length=self.model_config.get("text_seq_len", 512),

@@ -200,6 +200,23 @@ def generate(
     model_config = model_config or get_config(config_path).get("model", {})
     seed_everything(model_config.get("seed", 42))
     self = pipeline
+    if model_config.get("remote_text_encoder", False):
+        import requests
+        from huggingface_hub import get_token
+        import io
+        def remote_text_encoder(prompts):
+            response = requests.post(
+                "https://remote-text-encoder-flux-2.huggingface.co/predict",
+                json={"prompt": prompts},
+                headers={
+                    "Authorization": f"Bearer {get_token()}",
+                    "Content-Type": "application/json"
+                }
+            )
+            prompt_embeds = torch.load(io.BytesIO(response.content))
+
+            return prompt_embeds.to(self.device)
+
     # Force-disable scheduler dynamic shifting for inference and pin time shift to 10.
     # (Some configs enable dynamic shifting based on image token count; we want a fixed shift.)
     if hasattr(self, "scheduler") and hasattr(self.scheduler, "config"):
@@ -315,12 +332,13 @@ def generate(
                 f"Unsupported prompt/prompt_2 types: {type(effective_prompt)} and {type(prompt_2)}"
             )
 
-    text_encoder_out_layers = tuple(model_config.get("text_encoder_out_layers", (9, 18, 27)))
+    text_encoder_out_layers = tuple(model_config.get("text_encoder_out_layers", (9, 18, 27))) if not model_config.get("remote_text_encoder", False) else (10, 20, 30)
     prompt_embeds, text_ids = self.encode_prompt(
-        prompt=effective_prompt,
+        prompt=effective_prompt if not model_config.get("remote_text_encoder", False) else None,
+        prompt_embeds=remote_text_encoder(effective_prompt) if model_config.get("remote_text_encoder", False) else None,
         device=device,
         num_images_per_prompt=num_images_per_prompt,
-        prompt_embeds=prompt_embeds,
+        # prompt_embeds=prompt_embeds,
         max_sequence_length=max_sequence_length,
         text_encoder_out_layers=text_encoder_out_layers,
     )
@@ -330,7 +348,8 @@ def generate(
             if prompt is not None and isinstance(prompt, list):
                 negative_prompt = [negative_prompt] * len(prompt)
             negative_prompt_embeds, negative_text_ids = self.encode_prompt(
-                prompt=negative_prompt,
+                prompt=negative_prompt if not model_config.get("remote_text_encoder", False) else None,
+                prompt_embeds=remote_text_encoder(negative_prompt) if model_config.get("remote_text_encoder", False) else None,
                 # prompt_embeds=negative_prompt_embeds,
                 device=device,
                 num_images_per_prompt=num_images_per_prompt,
@@ -445,7 +464,7 @@ def generate(
                 progress_bar.update()
 
     # load the low-res image using center crop
-    # low_res_path = "/scratch/yuyao/Scale-DiT/c27a51768b26f8a2baafc8d785fad46f 2.jpg"
+    # low_res_path = "/scratch/yuyao/Scale-DiT/zzz/Pinterest fashion influencer, city street style, oversized Balmain blazer, green Alexander Wang cargo pants, Loewe crossbody, smiling with friends at outdoor plaza in Sydney during Fashion Week.png"
     low_res_path = None
     if low_res_path is not None: #TODO: need to fix I hate new diffusers version
         joint_size = model_config.get("joint_denoise_size", [256, 256])
@@ -538,6 +557,16 @@ def generate(
         guidance = torch.tensor([model_config.get("hr_guidance_scale", None)], device=device)
         guidance = guidance.expand(latents.shape[0])
 
+    image_seq_len = latents.shape[1]
+    mu = compute_empirical_mu(image_seq_len=image_seq_len, num_steps=hr_inference_steps)
+    sigmas = np.linspace(1.0, 1 / hr_inference_steps, hr_inference_steps)
+    timesteps, hr_inference_steps = retrieve_timesteps(
+        self.scheduler,
+        hr_inference_steps,
+        device,
+        sigmas=sigmas,
+        mu=mu,
+    )
     dlfg_timesteps = self.scheduler.timesteps[-hr_inference_steps:]
     
     if model_config.get("interpolation_init", False):
@@ -565,7 +594,8 @@ def generate(
         generator,
         None,
     )
-
+    self.scheduler.config.use_dynamic_shifting = False
+    self.scheduler.config.time_shift = 10
     hr_permutation_idx = window_permutation(
         H=model_config.get("image_size", [1024, 1024])[0] // patch_size,
         W=model_config.get("image_size", [1024, 1024])[1] // patch_size,
@@ -699,27 +729,29 @@ def generate(
                     low_res_timestep=0,
                 )[0]
             noise_pred = noise_pred[:, : latents.size(1) :]
-            # if self.do_classifier_free_guidance:
-            #     with self.transformer.cache_context("uncond"):
-            #         neg_noise_pred = tranformer_forward(
-            #         self.transformer,
-            #         model_config=model_config,
-            #         hidden_states=latents,
-            #         timestep=timestep / 1000,
-            #         guidance=None,
-            #         pooled_projections=None,
-            #         encoder_hidden_states=negative_prompt_embeds,
-            #         txt_ids=negative_text_ids,
-            #         img_ids=latent_image_ids,
-            #         joint_attention_kwargs=self.attention_kwargs,
-            #         return_dict=False,
-            #         # Newly added codes
-            #         low_res_guidance=lr_guidance,
-            #         low_res_img_ids=lr_ids,
-            #         low_res_timestep=0,
-            #     )[0]
-            #     neg_noise_pred = neg_noise_pred[:, : latents.size(1) :]
-            #     noise_pred = neg_noise_pred + guidance_scale *  )
+            if self.do_classifier_free_guidance and hr_guidance_scale > 1:
+                with self.transformer.cache_context("uncond"):
+                    neg_noise_pred = tranformer_forward(
+                    self.transformer,
+                    model_config=model_config,
+                    hidden_states=latents,
+                    timestep=timestep / 1000,
+                    guidance=None,
+                    pooled_projections=None,
+                    encoder_hidden_states=negative_prompt_embeds,
+                    txt_ids=negative_text_ids,
+                    img_ids=latent_image_ids,
+                    joint_attention_kwargs=self.attention_kwargs,
+                    return_dict=False,
+                    # Newly added codes
+                    low_res_guidance=lr_guidance,
+                    low_res_img_ids=lr_ids,
+                    low_res_timestep=0,
+                )[0]
+                neg_noise_pred = neg_noise_pred[:, : latents.size(1) :]
+                # if guidance_scale > 1:
+                    # noise_pred = neg_noise_pred
+                noise_pred = neg_noise_pred + guidance_scale * (noise_pred - neg_noise_pred)
             # Apply projected-flow guidance (cosine_shift) using the upsampled LR guidance latents.
             if guidance_schedule != "disable":
                 # Flow projection velocity that moves current sample toward the guidance latent.

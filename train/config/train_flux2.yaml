@@ -1,7 +1,7 @@
 flux_path: "black-forest-labs/FLUX.2-klein-base-9B"
 dtype: "bfloat16"
 #### New lora
-# lora_path: "/scratch/yuyao/Scale-DiT/runs/train20260228-182930/ckpt/2000/pytorch_lora_weights.safetensors"
+# lora_path: "/scratch/yuyao/Scale-DiT/runs/train20260305-001017/ckpt/18000/pytorch_lora_weights.safetensors"
 lora_path: null
 model:
   patch_size: 16
@@ -24,7 +24,8 @@ model:
   use_sliding_window: false
   # Optional: path to a precomputed dense attention mask (bool tensor of shape [L, L]).
   # If unset/null, the mask is built from config at runtime.
-  precomputed_attn_mask_path: "/scratch/yuyao/HiHi_T2I/src_new/flux/attn_masks/mask_expanded_128x64_test-new.pt"
+  # precomputed_attn_mask_path: "/scratch/yuyao/HiHi_T2I/src_new/flux/attn_masks/mask_expanded_128x64_test-new.pt"
+  precomputed_attn_mask_path:  "/scratch/yuyao/Scale-DiT/src/flux/attn_masks/mask_expanded_128x64_test-new.pt"
   # Block-Sparse Attention parameters
   use_block_sparse_attention: false
   # Sage blocksparse attention (CUDA)
@@ -40,13 +41,15 @@ model:
   finetuned_vae: false
   finetuned_vae_path: null
   permute_window_first: true
+  train: true
+  remote_text_encoder: false
 
 
 
 train:
   run_name: "train"
-  batch_size: 2
-  accumulate_grad_batches: 4
+  batch_size: 1
+  accumulate_grad_batches: 8
   dataloader_workers: 8
   save_interval: 1000
   sample_interval: 500
