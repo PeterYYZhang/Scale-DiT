@@ -1,0 +1,95 @@
+flux_path: "black-forest-labs/FLUX.2-klein-base-9B"
+dtype: "bfloat16"
+#### New lora
+# lora_path: "/scratch/yuyao/Scale-DiT/runs/train20260305-001017/ckpt/18000/pytorch_lora_weights.safetensors"
+lora_path: null
+model:
+  patch_size: 16
+  image_size: [1024, 1024]
+  joint_denoise_size: [256, 256] 
+  text_seq_len: 512 #512
+  downsample_factor: 4
+  window_size: [256, 256]
+  use_flash_attention: true
+  joint_denoise: true
+  scale_PE: true
+  interpolation_init: false
+  # Attention masking parameters
+  text_attend_scale: "limited"  # Controls how text tokens attend to other tokens ("all" or "limited")
+  hi_res_attend_scale: "all"  # Controls how high-res image tokens attend to low-res tokens ("all" or "limited")
+  # Position embedding parameters
+  ntk_factor: 1.0
+  theta: 2000.0
+  freq_filtering: false
+  use_sliding_window: false
+  # Optional: path to a precomputed dense attention mask (bool tensor of shape [L, L]).
+  # If unset/null, the mask is built from config at runtime.
+  # precomputed_attn_mask_path: "/scratch/yuyao/HiHi_T2I/src_new/flux/attn_masks/mask_expanded_128x64_test-new.pt"
+  precomputed_attn_mask_path:  "/scratch/yuyao/Scale-DiT/src/flux/attn_masks/mask_expanded_128x64_test-new.pt"
+  # Block-Sparse Attention parameters
+  use_block_sparse_attention: false
+  # Sage blocksparse attention (CUDA)
+  use_sage_blocksparse: false
+  sage_blk_q: 64
+  sage_blk_k: 64
+  sage_kernel_blk_q: 128
+  sage_kernel_blk_k: 64
+  sage_smooth_k: true
+  sage_pvthreshd: 10000000
+  sage_attention_sink: false
+  # finetuned vae
+  finetuned_vae: false
+  finetuned_vae_path: null
+  permute_window_first: true
+  train: true
+  remote_text_encoder: false
+
+
+
+train:
+  run_name: "train"
+  batch_size: 1
+  accumulate_grad_batches: 8
+  dataloader_workers: 8
+  save_interval: 1000
+  sample_interval: 500
+  max_steps: -1
+  max_epochs: -1  # Maximum number of epochs (-1 for unlimited)
+  gradient_checkpointing: true
+  save_path: "runs"
+  gradient_clip_val: 0.1
+  print_every_n_steps: 10
+
+  dataset:
+    name: "1kimages"
+    target_size: 1024
+    image_height: 1024
+    image_width: 1024
+    drop_text_prob: 0.1
+    urls: 
+      - "https://huggingface.co/datasets/zhang0jhon/Aesthetic-Train-V2/resolve/main/train/train.tar"
+
+  wandb:
+    project: "Hierarchical-attn-diff"
+
+  lora_config:
+    r: 16
+    lora_alpha: 16
+    init_lora_weights: "gaussian"
+    # target_modules: "(.*x_embedder|.*(?<!single_)transformer_blocks\\.[0-9]+\\.norm1\\.linear|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_k|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_q|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_v|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_out\\.0|.*(?<!single_)transformer_blocks\\.[0-9]+\\.ff\\.net\\.2|.*single_transformer_blocks\\.[0-9]+\\.norm\\.linear|.*single_transformer_blocks\\.[0-9]+\\.proj_mlp|.*single_transformer_blocks\\.[0-9]+\\.proj_out|.*single_transformer_blocks\\.[0-9]+\\.attn.to_k|.*single_transformer_blocks\\.[0-9]+\\.attn.to_q|.*single_transformer_blocks\\.[0-9]+\\.attn.to_v|.*single_transformer_blocks\\.[0-9]+\\.attn.to_out)"
+    # Flux2 uses Flux2TransformerBlock (ff.linear_in/linear_out) and Flux2SingleTransformerBlock (attn.to_qkv_mlp_proj, attn.to_out)
+    # See: https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/transformers/transformer_flux2.py
+    target_modules: "(.*x_embedder|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_k|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_q|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_v|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_out\\.0|.*(?<!single_)transformer_blocks\\.[0-9]+\\.ff\\.linear_in|.*(?<!single_)transformer_blocks\\.[0-9]+\\.ff\\.linear_out|.*single_transformer_blocks\\.[0-9]+\\.attn\\.to_qkv_mlp_proj|.*single_transformer_blocks\\.[0-9]+\\.attn\\.to_out)"
+  optimizer:
+    type: "Prodigy"
+    params:
+      lr: 1
+      use_bias_correction: true
+      safeguard_warmup: true
+      weight_decay: 0.01
+
+  generation:
+    num_inference_steps: 28 #28
+    lr_guidance_scale: 3.5 # 3.5
+    hr_inference_steps: 28 #28
+    hr_guidance_scale: 0 #4.5
