@@ -34,7 +34,7 @@ Ultra-high-resolution text-to-image generation is increasingly vital for applica
 
 - Training code ✅
 - Inference code ✅
-- Model checkpoints (LoRA) ✅ (see `checkpoints/`)
+- Model checkpoints (LoRA) ✅ (see `ckpts/`)
 
 ## Installation
 
@@ -47,7 +47,7 @@ conda activate ultragen
 To install the sparse attention kernel, please follow the installation instructions provided by SageAttention: [https://github.com/thu-ml/SpargeAttn/tree/main](https://github.com/thu-ml/SpargeAttn/tree/main).
 
 ## Inference (quickstart)
-Please download the LoRA checkpoint from [here](https://drive.google.com/drive/folders/1dSlbqCOErwTyHZ-BenAabZv49ylEzHic?usp=share_link) and place it in the `checkpoints` directory.
+Please download the LoRA checkpoint from [here](https://drive.google.com/drive/folders/1dSlbqCOErwTyHZ-BenAabZv49ylEzHic?usp=share_link) and place it in the `ckpts` directory.
 
 Use the provided config for 4 step inference:
 
@@ -79,7 +79,7 @@ You can modify the test prompts in the `prompt.txt` file. (which is loaded in th
 Run:
 ```bash
   accelerate config # use bf16 precision and set the number of GPUs you want to use
-  sh script/train.sh
+  sh script/train_flux2.sh
 ```
 
 ## Repo layout
