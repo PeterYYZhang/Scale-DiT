@@ -2,7 +2,7 @@
 
 [![arXiv](https://img.shields.io/badge/arXiv-2510.16325-b31b1b.svg)](https://arxiv.org/abs/2510.16325)
 [![PDF](https://img.shields.io/badge/PDF-2510.16325-b31b1b.svg)](https://arxiv.org/pdf/2510.16325)
-[![Page](https://img.shields.io/badge/PDF-2510.16325-b31b1b.svg)](https://peteryyzhang.github.io/HierEdit-page/)
+[![Page](https://img.shields.io/badge/github-repo-blue?logo=github)](https://peteryyzhang.github.io/HierEdit-page/)
 # News
 UltraImageGen is accepted by ECCV 2026!!!
 
