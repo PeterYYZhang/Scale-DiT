@@ -2,12 +2,15 @@
 
 [![arXiv](https://img.shields.io/badge/arXiv-2510.16325-b31b1b.svg)](https://arxiv.org/abs/2510.16325)
 [![PDF](https://img.shields.io/badge/PDF-2510.16325-b31b1b.svg)](https://arxiv.org/pdf/2510.16325)
+![PDF](https://peteryyzhang.github.io/HierEdit-page/)
+# News
+UltraImageGen is accepted by ECCV 2026!!!
 
 Official code for **UltraImageGen** ([arXiv:2510.16325](https://arxiv.org/abs/2510.16325)):
 *Yuyao Zhang, Yu-Wing Tai*.
 
 
-![UltraGen teaser](assets/Teasor.jpg)
+![UltraGen teaser](assets/Teasor.jpeg)
 
 
 ## Abstract
