@@ -98,15 +98,11 @@ Run:
 If you find this work useful, please cite:
 
 ```bibtex
-@misc{zhang2025scaledit,
-  title        = {UltraGen: Efficient Ultra-High-Resolution Image Generation with Hierarchical Local Attention},
-  author       = {Yuyao Zhang and Yu-Wing Tai},
-  year         = {2025},
-  eprint       = {2510.16325},
-  archivePrefix= {arXiv},
-  primaryClass = {cs.CV},
-  doi          = {10.48550/arXiv.2510.16325},
-  url          = {https://arxiv.org/abs/2510.16325}
+@inproceedings{zhang2025layercraft,
+  title     = {{LayerCraft}: Enhancing Text-to-Image Generation with CoT Reasoning and Layered Object Integration},
+  author    = {Zhang, Yuyao and Li, Jinghao and Tai, Yu-Wing},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2025}
 }
 ```
 
