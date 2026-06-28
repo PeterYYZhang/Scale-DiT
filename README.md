@@ -98,11 +98,11 @@ Run:
 If you find this work useful, please cite:
 
 ```bibtex
-@inproceedings{zhang2025layercraft,
-  title     = {{LayerCraft}: Enhancing Text-to-Image Generation with CoT Reasoning and Layered Object Integration},
-  author    = {Zhang, Yuyao and Li, Jinghao and Tai, Yu-Wing},
-  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
-  year      = {2025}
+@inproceedings{zhang2026ultraimagegen,
+  title     = {{UltraImageGen}: Efficient Ultra-High-Resolution Image Generation with Hierarchical Local Attention},
+  author    = {Zhang, Yuyao and Tai, Yu-Wing},
+  booktitle = {European Conference on Computer Vision},
+  year      = {2026}
 }
 ```
 
